@@ -13,7 +13,7 @@ function xmlEscape(value) {
 export async function detectPublicUrl() {
   if (process.env.PUBLIC_BASE_URL) return process.env.PUBLIC_BASE_URL.replace(/\/$/, "");
   try {
-    const response = await fetch("http://127.0.0.1:4040/api/tunnels");
+    const response = await fetch("44.205.191.134:4040/api/tunnels");
     if (!response.ok) return "";
     const data = await response.json();
     const https = (data.tunnels || []).find((tunnel) => String(tunnel.public_url || "").startsWith("https://"));
