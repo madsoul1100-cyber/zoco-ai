@@ -1,0 +1,16 @@
+{
+  "name": "zoco-ai",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Zoco AI — self-hosted voice calling platform",
+  "scripts": {
+    "install:all": "npm install && npm install --prefix backend && npm install --prefix frontend",
+    "infra": "docker compose up -d",
+    "infra:down": "docker compose down",
+    "dev": "concurrently -n api,web -c cyan,magenta \"npm run dev --prefix backend\" \"npm run dev --prefix frontend\"",
+    "start": "npm run start --prefix backend"
+  },
+  "devDependencies": {
+    "concurrently": "^9.1.2"
+  }
+}

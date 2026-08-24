@@ -1,0 +1,30 @@
+{
+  "maxAttempts": 3,
+  "recallOn": [
+    "no_answer",
+    "busy",
+    "dropped",
+    "voicemail",
+    "callback_requested"
+  ],
+  "successDispositions": [
+    "success",
+    "qualified",
+    "booked",
+    "not_interested",
+    "do_not_call"
+  ],
+  "delaysMinutes": {
+    "no_answer": 60,
+    "busy": 15,
+    "dropped": 5,
+    "voicemail": 1440,
+    "callback_requested": 120,
+    "failed": 30
+  },
+  "businessHours": {
+    "timezone": "Asia/Kolkata",
+    "start": "09:00",
+    "end": "19:00"
+  }
+}
