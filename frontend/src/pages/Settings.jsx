@@ -7,14 +7,17 @@ export default function Settings() {
   const [telephony, setTelephony] = useState(null);
   const [ai, setAi] = useState(null);
   const [keys, setKeys] = useState({ openrouter: "", sarvam: "", grok: "", openai: "" });
+  const [members, setMembers] = useState([]);
+  const [invite, setInvite] = useState({ email: "", password: "", name: "" });
   const [saved, setSaved] = useState("");
 
   useEffect(() => {
-    Promise.all([api.rules(), api.telephony(), api.aiSettings()]).then(([nextRules, tel, nextAi]) => {
+    Promise.all([api.rules(), api.telephony(), api.aiSettings(), api.members().catch(() => [])]).then(([nextRules, tel, nextAi, nextMembers]) => {
       setRules(nextRules);
       setTelephony(tel);
       setAi(nextAi);
       setKeys(nextAi.keys || { openrouter: "", sarvam: "", grok: "", openai: "" });
+      setMembers(nextMembers);
     });
   }, []);
 
@@ -123,8 +126,33 @@ export default function Settings() {
             </label>
           ))}
           <p className="muted">Workspace line: {telephony.workspacePhone || "not registered"} · Provider {telephony.twilioReady ? "ready" : "not connected"}</p>
+          <p className="muted">WhatsApp: point Twilio’s messaging webhook to {window.location.origin}/webhooks/twilio/whatsapp. Optional env TWILIO_WHATSAPP_FROM=whatsapp:+1878…</p>
         </section>
       </form>
+
+      <section className="card grid" style={{ marginTop: 16 }}>
+        <h3>Workspace members</h3>
+        <p className="muted">People who can open this Zoco workspace.</p>
+        {members.map((member) => (
+          <div className="row" key={member.id}>
+            <strong>{member.name || member.email}</strong>
+            <span className="muted">{member.email} · {member.role}</span>
+            <button className="btn ghost" type="button" onClick={() => api.deleteMember(member.id).then(() => setMembers(members.filter((item) => item.id !== member.id)))}>Remove</button>
+          </div>
+        ))}
+        <form className="grid" onSubmit={async (event) => {
+          event.preventDefault();
+          const created = await api.addMember(invite);
+          setMembers([...members, created]);
+          setInvite({ email: "", password: "", name: "" });
+          setSaved("member");
+        }}>
+          <label>Name<input className="input" value={invite.name} onChange={(e) => setInvite({ ...invite, name: e.target.value })} /></label>
+          <label>Email<input className="input" type="email" value={invite.email} onChange={(e) => setInvite({ ...invite, email: e.target.value })} required /></label>
+          <label>Temporary password<input className="input" type="password" value={invite.password} onChange={(e) => setInvite({ ...invite, password: e.target.value })} required /></label>
+          <button className="btn" type="submit">{saved === "member" ? "Added" : "Add member"}</button>
+        </form>
+      </section>
     </>
   );
 }

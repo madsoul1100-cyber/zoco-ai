@@ -17,6 +17,13 @@ function glyph(type) {
       </svg>
     );
   }
+  if (type === "condition") {
+    return (
+      <svg viewBox="0 0 24 24" fill="none">
+        <path d="M12 4 20 12l-8 8-8-8 8-8z" stroke="currentColor" strokeWidth="1.6" />
+      </svg>
+    );
+  }
   if (type === "end") {
     return (
       <svg viewBox="0 0 24 24" fill="none">
@@ -54,6 +61,21 @@ export function WorkflowPanel({ agent, onChange }) {
   function removeNode(id) {
     const nodes = flow.nodes.filter((node) => node.id !== id);
     onChange(patchWorkflow(agent, { enabled: nodes.length > 0 && flow.enabled, nodes }));
+  }
+
+  function addBranch() {
+    const yesId = `stage_${Math.random().toString(36).slice(2, 8)}`;
+    const noId = `stage_${Math.random().toString(36).slice(2, 8)}`;
+    const branchId = `if_${Math.random().toString(36).slice(2, 8)}`;
+    onChange(patchWorkflow(agent, {
+      enabled: true,
+      nodes: [
+        ...flow.nodes,
+        { id: branchId, type: "condition", title: "If interested", match: "yes or interested", yes: yesId, no: noId, body: "" },
+        { id: yesId, type: "stage", title: "Yes path", body: "Continue toward the goal." },
+        { id: noId, type: "end", title: "No path", body: "Close politely and hang up." },
+      ],
+    }));
   }
 
   function addStage() {
@@ -98,7 +120,7 @@ export function WorkflowPanel({ agent, onChange }) {
       <div className="panel-head">
         <div>
           <h3>Workflow</h3>
-          <p className="muted">The agent follows these stages in order. It will not name the stages out loud.</p>
+          <p className="muted">The agent follows stages and branches. It will not name the stages out loud.</p>
         </div>
         <label className="toggle-inline">
           <input
@@ -143,14 +165,38 @@ export function WorkflowPanel({ agent, onChange }) {
                 onChange={(e) => updateNode(node.id, { body: e.target.value })}
                 placeholder="What happens in this stage"
               />
+              {node.type === "condition" ? (
+                <div className="flow-branch">
+                  <label>Match<input className="input" value={node.match || ""} onChange={(e) => updateNode(node.id, { match: e.target.value })} placeholder="yes, interested, callback" /></label>
+                  <label>Yes →
+                    <select className="input" value={node.yes || ""} onChange={(e) => updateNode(node.id, { yes: e.target.value })}>
+                      {flow.nodes.filter((item) => item.id !== node.id).map((item) => (
+                        <option key={item.id} value={item.id}>{item.title}</option>
+                      ))}
+                    </select>
+                  </label>
+                  <label>No →
+                    <select className="input" value={node.no || ""} onChange={(e) => updateNode(node.id, { no: e.target.value })}>
+                      {flow.nodes.filter((item) => item.id !== node.id).map((item) => (
+                        <option key={item.id} value={item.id}>{item.title}</option>
+                      ))}
+                    </select>
+                  </label>
+                </div>
+              ) : null}
             </div>
           </li>
         ))}
       </ol>
 
-      <button className="btn ghost add-row" type="button" onClick={addStage}>
-        + Add stage
-      </button>
+      <div className="row">
+        <button className="btn ghost add-row" type="button" onClick={addStage}>
+          + Add stage
+        </button>
+        <button className="btn ghost add-row" type="button" onClick={addBranch}>
+          + Add branch
+        </button>
+      </div>
     </section>
   );
 }

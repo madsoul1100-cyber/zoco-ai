@@ -2,11 +2,15 @@ const API = "";
 
 async function request(path, options = {}) {
   const response = await fetch(`${API}${path}`, {
+    credentials: "include",
     headers: { "Content-Type": "application/json", ...(options.headers || {}) },
     ...options,
   });
   if (!response.ok) {
     const body = await response.json().catch(() => ({}));
+    if (response.status === 401 && body.auth) {
+      window.dispatchEvent(new Event("zoco-auth"));
+    }
     throw new Error(body.error || `Request failed (${response.status})`);
   }
   return response.json();
@@ -27,6 +31,7 @@ export const api = {
   sendMessageStream: async (id, text, { onDelta, onUser, source = "chat" } = {}) => {
     const response = await fetch(`/api/calls/${id}/messages/stream`, {
       method: "POST",
+      credentials: "include",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ text, source }),
     });
@@ -82,7 +87,7 @@ export const api = {
     if (text) data.append("text", text);
     const uploads = files?.length ? [...files] : file ? [file] : [];
     uploads.forEach((item) => data.append("file", item));
-    const response = await fetch(`/api/knowledge/${id}/documents`, { method: "POST", body: data });
+    const response = await fetch(`/api/knowledge/${id}/documents`, { method: "POST", body: data, credentials: "include" });
     if (!response.ok) {
       const body = await response.json().catch(() => ({}));
       throw new Error(body.error || "Could not add document");
@@ -120,10 +125,27 @@ export const api = {
   saveAi: (payload) => request("/api/ai", { method: "PUT", body: JSON.stringify(payload) }),
   translate: (payload) => request("/api/translate", { method: "POST", body: JSON.stringify(payload) }),
   speak: (payload) => request("/api/tts", { method: "POST", body: JSON.stringify(payload) }),
+  transcribe: async (blob, language = "en-IN") => {
+    const data = new FormData();
+    data.append("audio", blob, "speech.webm");
+    data.append("language", language);
+    const response = await fetch("/api/stt", { method: "POST", body: data, credentials: "include" });
+    const body = await response.json().catch(() => ({}));
+    if (!response.ok) throw new Error(body.error || "Speech to text failed");
+    return body;
+  },
+  agentVersions: (id) => request(`/api/agents/${id}/versions`),
+  authMe: () => request("/api/auth/me"),
+  login: (payload) => request("/api/auth/login", { method: "POST", body: JSON.stringify(payload) }),
+  setupWorkspace: (payload) => request("/api/auth/setup", { method: "POST", body: JSON.stringify(payload) }),
+  logout: () => request("/api/auth/logout", { method: "POST", body: "{}" }),
+  members: () => request("/api/members"),
+  addMember: (payload) => request("/api/members", { method: "POST", body: JSON.stringify(payload) }),
+  deleteMember: (id) => request(`/api/members/${id}`, { method: "DELETE" }),
   uploadRecording: async (id, blob) => {
     const data = new FormData();
     data.append("audio", blob, `${id}.webm`);
-    const response = await fetch(`/api/calls/${id}/recording`, { method: "POST", body: data });
+    const response = await fetch(`/api/calls/${id}/recording`, { method: "POST", body: data, credentials: "include" });
     if (!response.ok) throw new Error("Recording upload failed");
     return response.json();
   },

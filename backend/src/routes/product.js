@@ -301,6 +301,7 @@ export function mountProductRoutes(app, { upload } = {}) {
       agentId: agent.id,
       agentName: agent.name,
       phoneNumber: normalizePhone(req.body?.phoneNumber || tel.fromNumber),
+      agentVersion: req.body?.agentVersion || agent.version || 1,
       greeting: req.body?.greeting || agent.greeting || "",
       status: "paused",
       enabled: false,
@@ -421,15 +422,17 @@ export function mountProductRoutes(app, { upload } = {}) {
     const agent = await getAgent(req.body?.agentId);
     if (!agent) return res.status(400).json({ error: "Choose an agent first" });
     const now = new Date().toISOString();
-    const parsed = parseContactRows(req.body?.contacts || []);
+    const parsed = parseContactRows(req.body?.contacts || [], req.body?.columnMap);
     const campaign = await saveCampaign(ensureCampaignShape({
       id: `cmp_${uuid().slice(0, 8)}`,
       name: req.body?.name || `${agent.name} campaign`,
       agentId: agent.id,
       agentName: agent.name,
+      agentVersion: req.body?.agentVersion || agent.version || 1,
       language: normalizeLanguage(req.body?.language || agent.language),
       status: "draft",
       concurrency: Number(req.body?.concurrency || 1),
+      columnMap: req.body?.columnMap && typeof req.body.columnMap === "object" ? req.body.columnMap : {},
       schedule: req.body?.schedule,
       contacts: parsed.valid,
       launchedAt: null,
@@ -467,7 +470,7 @@ export function mountProductRoutes(app, { upload } = {}) {
     const existing = await getCampaign(req.params.id);
     if (!existing) return res.status(404).json({ error: "Campaign not found" });
     const shaped = ensureCampaignShape(existing);
-    const parsed = parseContactRows((req.body?.contacts || []).map((row) => ({ ...row })));
+    const parsed = parseContactRows((req.body?.contacts || []).map((row) => ({ ...row })), existing.columnMap);
     const cohort = {
       id: `coh_${uuid().slice(0, 8)}`,
       name: req.body?.name || `cohort_${(shaped.cohorts.length + 1).toString().padStart(2, "0")}`,
@@ -507,7 +510,7 @@ export function mountProductRoutes(app, { upload } = {}) {
     const campaign = await getCampaign(req.params.id);
     if (!campaign) return res.status(404).json({ error: "Campaign not found" });
     const shaped = ensureCampaignShape(campaign);
-    const agent = await getAgent(shaped.agentId);
+    const agent = await getAgent(shaped.agentId, shaped.agentVersion);
     if (!agent) return res.status(400).json({ error: "Campaign agent is missing" });
     const now = new Date().toISOString();
     const tel = await resolveTelephony();
@@ -522,12 +525,13 @@ export function mountProductRoutes(app, { upload } = {}) {
         id: `call_${uuid().slice(0, 10)}`,
         agentId: agent.id,
         agentName: agent.name,
+        agentVersion: shaped.agentVersion || agent.version || 1,
         campaignId: shaped.id,
         campaignName: shaped.name,
         cohortId: row.cohortId || "",
         direction: "outbound",
         channel: "voice",
-        customer: { name: row.name, phone: row.phone, notes: row.notes || "" },
+        customer: { name: row.name, phone: row.phone, notes: row.notes || "", ...(row.vars || {}) },
         status: "queued",
         disposition: "in_progress",
         attempt: 1,
@@ -536,7 +540,7 @@ export function mountProductRoutes(app, { upload } = {}) {
         endedAt: null,
         durationSeconds: 0,
         recordingUrl: null,
-        gathered: {},
+        gathered: { ...(row.vars || {}), name: row.name, phone: row.phone },
         language: shaped.language || agent.language,
         outcomeReason: null,
         recall: { needed: false, reason: null, scheduledAt: null, attempt: 1, maxAttempts: 3 },

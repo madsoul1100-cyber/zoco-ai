@@ -154,6 +154,22 @@ function firstReadyLlm(keys) {
   return LLM_PROVIDERS.find((item) => keys[item.id])?.id || "openrouter";
 }
 
+export function fallbackLlmConfig(settings = defaultAiSettings()) {
+  const keys = mergedKeys(settings);
+  if (keys.openrouter) {
+    const spec = providerById("openrouter");
+    return {
+      provider: "openrouter",
+      label: spec.label,
+      apiKey: keys.openrouter,
+      baseUrl: (process.env.OPENROUTER_BASE_URL || spec.baseUrl).replace(/\/$/, ""),
+      model: process.env.OPENROUTER_MODEL || spec.models[0].id,
+      headerStyle: spec.headerStyle || spec.id,
+    };
+  }
+  return null;
+}
+
 export function resolveLlmConfig(agent = {}, settings = defaultAiSettings()) {
   const keys = mergedKeys(settings);
   const providerId = agent.llmProvider || settings.defaultLlmProvider || firstReadyLlm(keys);

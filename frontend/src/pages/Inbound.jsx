@@ -12,7 +12,7 @@ export default function Inbound() {
   const [open, setOpen] = useState(false);
   const [busy, setBusy] = useState(false);
   const [ready, setReady] = useState(false);
-  const [form, setForm] = useState({ name: "", agentId: "", phoneNumber: "" });
+  const [form, setForm] = useState({ name: "", agentId: "", phoneNumber: "", agentVersion: "" });
   const [menu, setMenu] = useState("");
 
   async function refresh() {
@@ -22,6 +22,7 @@ export default function Inbound() {
     setForm((current) => ({
       ...current,
       agentId: current.agentId || agentList.find((agent) => agent.direction === "inbound")?.id || agentList[0]?.id || "",
+      agentVersion: current.agentVersion || agentList[0]?.version || "",
       phoneNumber: current.phoneNumber || tel.fromNumber || "",
     }));
     setReady(true);
@@ -148,12 +149,16 @@ export default function Inbound() {
           <label>Name<input className="input" value={form.name} onChange={(e) => setForm({ ...form, name: e.target.value })} placeholder="MLC Graduate Help - S1 Inbound Demo" required /></label>
           <label>
             Agent
-            <select className="input" value={form.agentId} onChange={(e) => setForm({ ...form, agentId: e.target.value })}>
+            <select className="input" value={form.agentId} onChange={(e) => {
+              const agent = agents.find((item) => item.id === e.target.value);
+              setForm({ ...form, agentId: e.target.value, agentVersion: agent?.version || "" });
+            }}>
               {agents.map((agent) => (
-                <option key={agent.id} value={agent.id}>{agent.name}</option>
+                <option key={agent.id} value={agent.id}>{agent.name} (v{agent.version || 1})</option>
               ))}
             </select>
           </label>
+          <label>Pin version<input className="input" type="number" min="1" value={form.agentVersion} onChange={(e) => setForm({ ...form, agentVersion: e.target.value })} /></label>
           <label>Phone number<input className="input" value={form.phoneNumber} onChange={(e) => setForm({ ...form, phoneNumber: e.target.value })} placeholder="+91…" /></label>
         </form>
       </Modal>

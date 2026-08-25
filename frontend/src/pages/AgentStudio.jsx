@@ -110,6 +110,8 @@ export default function AgentStudio() {
   const agentRef = useRef(null);
   const lastSpokenRef = useRef("");
   const ignoreUntilRef = useRef(0);
+  const catalogRef = useRef(null);
+  const asrLoopRef = useRef(false);
   const [tab, setTab] = useState(() => {
     const requested = searchParams.get("tab");
     if (requested && RAIL.some((item) => item.id === requested)) return requested;
@@ -154,6 +156,10 @@ export default function AgentStudio() {
   useEffect(() => {
     agentRef.current = agent;
   }, [agent]);
+
+  useEffect(() => {
+    catalogRef.current = catalog;
+  }, [catalog]);
 
   useEffect(() => {
     if (!agent || !catalog || agent.llmProvider) return;
@@ -413,6 +419,7 @@ export default function AgentStudio() {
   }
 
   function stopListening() {
+    asrLoopRef.current = false;
     clearTimeout(silenceRef.current);
     try {
       recognitionRef.current?.abort();
@@ -432,7 +439,55 @@ export default function AgentStudio() {
     startRecognition();
   }
 
+  async function startSarvamLoop() {
+    if (asrLoopRef.current) return;
+    asrLoopRef.current = true;
+    setPhase("listening");
+    let stream;
+    try {
+      stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+      while (asrLoopRef.current && wantListenRef.current && !speakingRef.current && !sendingRef.current && isLive()) {
+        const chunks = [];
+        const media = new MediaRecorder(stream);
+        media.ondataavailable = (event) => {
+          if (event.data.size) chunks.push(event.data);
+        };
+        media.start();
+        await delay(3200);
+        if (media.state === "recording") media.stop();
+        await new Promise((resolve) => {
+          media.onstop = resolve;
+        });
+        if (!asrLoopRef.current || speakingRef.current || sendingRef.current) break;
+        const blob = new Blob(chunks, { type: "audio/webm" });
+        if (blob.size < 1800) continue;
+        const { transcript } = await api.transcribe(blob, callRef.current?.language || agentRef.current?.language || "en-IN");
+        const spoken = String(transcript || "").trim();
+        if (spoken.length >= 2 && !isNoiseTranscript(spoken, lastSpokenRef.current)) {
+          heardRef.current = spoken;
+          setHeardText(spoken);
+          await send(spoken);
+          break;
+        }
+      }
+    } catch (err) {
+      if (wantListenRef.current) startBrowserRecognition();
+      else setError(err.message);
+    } finally {
+      asrLoopRef.current = false;
+      stream?.getTracks().forEach((track) => track.stop());
+    }
+  }
+
   function startRecognition() {
+    if (catalogRef.current?.keys?.sarvam) {
+      startSarvamLoop();
+      return;
+    }
+    startBrowserRecognition();
+  }
+
+  function startBrowserRecognition() {
     const Speech = SpeechEngine();
     if (!Speech) {
       setError("Voice listening needs Chrome or Edge. You can still type.");
@@ -542,6 +597,7 @@ export default function AgentStudio() {
       voice: voiceName || agent.voice,
       version: (Number(agent.version) || 1) + 1,
       status: agent.status || "draft",
+      commitVersion: true,
       instructionSections: sections,
       instructions: compiled,
       persona: compiled,

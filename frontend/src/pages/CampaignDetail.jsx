@@ -3,7 +3,7 @@ import { Link, useNavigate, useParams } from "react-router-dom";
 import { api } from "../api.js";
 import { ChartLegend, StackedBars } from "../components/BarChart.jsx";
 import { Modal, StatusBadge, aboutTime, when } from "../components/ui.jsx";
-import { parseCsv } from "../lib/csv.js";
+import { parseCsvTable } from "../lib/csv.js";
 
 export default function CampaignDetail() {
   const { id } = useParams();
@@ -49,7 +49,7 @@ export default function CampaignDetail() {
 
   async function addCohort(event) {
     event.preventDefault();
-    const contacts = parseCsv(cohortForm.csv);
+    const contacts = parseCsvTable(cohortForm.csv).rows;
     if (!contacts.length) {
       setError("Paste name,phone rows for this cohort.");
       return;

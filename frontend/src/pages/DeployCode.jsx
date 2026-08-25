@@ -6,6 +6,7 @@ export default function DeployCode() {
   const [agents, setAgents] = useState([]);
   const [telephony, setTelephony] = useState(null);
   const [agentId, setAgentId] = useState("");
+  const [copied, setCopied] = useState("");
 
   useEffect(() => {
     Promise.all([api.agents(), api.telephony()]).then(([list, tel]) => {
@@ -15,7 +16,10 @@ export default function DeployCode() {
     });
   }, []);
 
-  const origin = window.location.origin.replace("5173", "8787");
+  const origin = window.location.origin;
+  const widget = `<script src="${origin}/widget.js" data-agent="${agentId || "agt_xxx"}" data-origin="${origin}"></script>
+<script>window.ZocoWidget.mount(document.body, { label: "Talk to us" });</script>`;
+  const iframe = `<iframe src="${origin}/embed/${agentId || "agt_xxx"}" width="420" height="640" style="border:0;border-radius:16px" allow="microphone"></iframe>`;
   const snippet = `curl -X POST ${origin}/api/calls \\
   -H "Content-Type: application/json" \\
   -d '{
@@ -25,11 +29,17 @@ export default function DeployCode() {
     "customer": { "name": "Riya Shah", "phone": "+919876543210" }
   }'`;
 
+  function copy(label, text) {
+    navigator.clipboard?.writeText(text);
+    setCopied(label);
+    setTimeout(() => setCopied(""), 1400);
+  }
+
   return (
     <>
       <PageHeader
         title="Deploy with code"
-        subtitle="Trigger the same agent from your CRM, website, or backend. The call JSON and recording stay in Zoco."
+        subtitle="Website widget, embed, or a backend call. The same agent, recordings, and transcripts stay in Zoco."
       />
       <div className="grid split">
         <section className="card grid">
@@ -41,11 +51,17 @@ export default function DeployCode() {
               ))}
             </select>
           </label>
-          <p className="muted">POST /api/calls starts an outbound dial when Twilio is connected. Without it, the studio still runs in the browser.</p>
           <p className="muted">Live line: {telephony?.twilioReady ? "ready" : "not connected"} · From {telephony?.fromNumber || "—"}</p>
+          <a className="btn ghost" href={`/embed/${agentId}`} target="_blank" rel="noreferrer">Open widget preview</a>
         </section>
-        <section className="card">
-          <h3>Start a call</h3>
+        <section className="card grid">
+          <h3>Website snippet</h3>
+          <pre className="json">{widget}</pre>
+          <button className="btn ghost" type="button" onClick={() => copy("widget", widget)}>{copied === "widget" ? "Copied" : "Copy snippet"}</button>
+          <h3>Embed iframe</h3>
+          <pre className="json">{iframe}</pre>
+          <button className="btn ghost" type="button" onClick={() => copy("iframe", iframe)}>{copied === "iframe" ? "Copied" : "Copy iframe"}</button>
+          <h3>Start a phone call</h3>
           <pre className="json">{snippet}</pre>
         </section>
       </div>

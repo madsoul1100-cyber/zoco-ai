@@ -85,12 +85,67 @@ export async function listAgents() {
   return agents;
 }
 
-export async function getAgent(id) {
+export async function getAgent(id, version) {
   const cached = await cacheGet(`agent:${id}`);
-  if (cached) return cached;
-  const agent = fromDoc(await col("agents").findOne({ _id: id }));
-  if (agent) await cacheSet(`agent:${id}`, agent, 60);
+  const agent = cached || fromDoc(await col("agents").findOne({ _id: id }));
+  if (agent && !cached) await cacheSet(`agent:${id}`, agent, 60);
+  if (!agent) return null;
+  const want = version === undefined || version === null || version === "" ? null : Number(version);
+  if (want && want !== Number(agent.version || 1)) {
+    const snap = fromDoc(await col("agentVersions").findOne({ agentId: id, version: want }));
+    if (snap?.snapshot) return { ...snap.snapshot, id, version: want, pinned: true };
+  }
   return agent;
+}
+
+export async function getCallAgent(call) {
+  if (!call?.agentId) return null;
+  return getAgent(call.agentId, call.agentVersion);
+}
+
+export async function listAgentVersions(agentId) {
+  return (await col("agentVersions").find({ agentId }).sort({ version: -1 }).toArray()).map(fromDoc);
+}
+
+export async function commitAgentVersion(agent) {
+  const version = Number(agent.version || 1);
+  const id = `${agent.id}:v${version}`;
+  await col("agentVersions").replaceOne(
+    { _id: id },
+    toDoc({
+      id,
+      agentId: agent.id,
+      version,
+      name: agent.name,
+      snapshot: agent,
+      createdAt: new Date().toISOString(),
+    }),
+    { upsert: true }
+  );
+  return { id, version };
+}
+
+export async function retargetGrokAgents() {
+  const agents = await listAgents();
+  let count = 0;
+  for (const agent of agents) {
+    const grokish = agent.llmProvider === "grok" || /^grok/i.test(String(agent.llmModel || ""));
+    if (!grokish) continue;
+    agent.llmProvider = "openrouter";
+    agent.llmModel = process.env.OPENROUTER_MODEL || "google/gemini-2.5-flash";
+    await saveAgent(agent);
+    count += 1;
+  }
+  if (count) console.log(`Retargeted ${count} Grok agent(s) to OpenRouter Gemini`);
+  return count;
+}
+
+export async function countLiveCampaignCalls(campaignId) {
+  if (!campaignId) return 0;
+  return col("calls").countDocuments({
+    campaignId,
+    status: { $in: ["ringing", "in_progress"] },
+  });
 }
 
 export async function saveAgent(agent) {

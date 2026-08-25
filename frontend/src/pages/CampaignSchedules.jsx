@@ -25,7 +25,7 @@ export default function CampaignSchedules() {
   async function save(event) {
     event.preventDefault();
     setError("");
-    const saved = await api.updateCampaign(id, { schedule: form });
+    const saved = await api.updateCampaign(id, { schedule: form, concurrency: campaign.concurrency, agentVersion: campaign.agentVersion || null });
     setCampaign(saved);
     setNotice("Schedule saved.");
   }
@@ -53,6 +53,14 @@ export default function CampaignSchedules() {
           <label>End<input className="input" value={form.end} onChange={(e) => setForm({ ...form, end: e.target.value })} /></label>
           <label>Days<input className="input" value={form.days} onChange={(e) => setForm({ ...form, days: e.target.value })} /></label>
           <label>Timezone<input className="input" value={form.timezone} onChange={(e) => setForm({ ...form, timezone: e.target.value })} /></label>
+          <label>
+            Max concurrent calls
+            <input className="input" type="number" min="1" max="50" value={campaign.concurrency || 1} onChange={(e) => api.updateCampaign(id, { concurrency: Number(e.target.value) }).then(setCampaign)} />
+          </label>
+          <label>
+            Pinned agent version
+            <input className="input" type="number" min="1" value={campaign.agentVersion || ""} placeholder="latest" onChange={(e) => api.updateCampaign(id, { agentVersion: Number(e.target.value) || null }).then(setCampaign)} />
+          </label>
           <div className="row">
             <button className="btn" type="submit">Save schedule</button>
             <Link className="btn ghost" to={`/campaigns/${id}`}>Back to campaign</Link>

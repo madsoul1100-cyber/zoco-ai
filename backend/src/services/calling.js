@@ -1,7 +1,8 @@
 import { v4 as uuid } from "uuid";
 import { recordTurn } from "../infra/events.js";
 import { enqueueDial, enqueueRecall, queueState } from "../infra/queue.js";
-import { getAgent, getCall, saveCall } from "../store.js";
+import { countLiveCampaignCalls, getCall, getCallAgent, getCampaign, saveCall } from "../store.js";
+import { inCallingWindow, msUntilWindow } from "../engine/window.js";
 import { placeTwilioCall, resolveTelephony } from "../telephony/twilio.js";
 
 export async function attachTurn(call, message, source) {
@@ -14,6 +15,8 @@ export async function attachTurn(call, message, source) {
 
 export function inferSource(call) {
   if (call.channel === "telephony") return "telephony";
+  if (call.channel === "whatsapp") return "whatsapp";
+  if (call.channel === "widget") return "widget";
   if (call.channel === "voice") return "voice";
   return "chat";
 }
@@ -73,7 +76,7 @@ export async function queueOrDial(call) {
 export async function performRecall(previousId) {
   const previous = await getCall(previousId);
   if (!previous) throw new Error("Call not found");
-  const agent = await getAgent(previous.agentId);
+  const agent = await getCallAgent(previous);
   if (!agent) throw new Error("Agent missing");
 
   previous.recall = { ...previous.recall, needed: false, reason: "recalled" };
@@ -124,6 +127,19 @@ export async function handleCallJob(job) {
       return;
     }
     if (call.twilioSid) return;
+    if (call.campaignId) {
+      const campaign = await getCampaign(call.campaignId);
+      if (!campaign || campaign.status === "paused") return;
+      if (!inCallingWindow(campaign.schedule)) {
+        await enqueueDial(call.id, { delayMs: msUntilWindow(campaign.schedule), jobId: `dial-${call.id}-win-${Date.now()}` });
+        return;
+      }
+      const live = await countLiveCampaignCalls(campaign.id);
+      if (live >= Number(campaign.concurrency || 1)) {
+        await enqueueDial(call.id, { delayMs: 15000, jobId: `dial-${call.id}-slot-${Date.now()}` });
+        return;
+      }
+    }
     await dialLiveCall(call);
     return;
   }

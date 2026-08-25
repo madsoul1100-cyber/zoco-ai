@@ -1,3 +1,4 @@
+import { useEffect, useState } from "react";
 import { NavLink, Route, Routes, useLocation } from "react-router-dom";
 import AgentStudio from "./pages/AgentStudio.jsx";
 import Agents from "./pages/Agents.jsx";
@@ -17,11 +18,13 @@ import Inbound from "./pages/Inbound.jsx";
 import InboundDetail from "./pages/InboundDetail.jsx";
 import Knowledge from "./pages/Knowledge.jsx";
 import KnowledgeDetail from "./pages/KnowledgeDetail.jsx";
+import Login from "./pages/Login.jsx";
 import PhoneNumbers from "./pages/PhoneNumbers.jsx";
 import Pricing from "./pages/Pricing.jsx";
 import Settings from "./pages/Settings.jsx";
 import Usage from "./pages/Usage.jsx";
 import Workflows from "./pages/Workflows.jsx";
+import { api } from "./api.js";
 
 const nav = [
   { section: "Voice agents", items: [["/", "Home", "home"]] },
@@ -96,6 +99,19 @@ function NavIcon({ name }) {
 export default function App() {
   const location = useLocation();
   const isStudio = /^\/agents\/[^/]+$/.test(location.pathname);
+  const [session, setSession] = useState(undefined);
+
+  useEffect(() => {
+    api.authMe().then(setSession).catch(() => setSession({ user: null, setup: true }));
+    const onAuth = () => setSession((current) => ({ ...(current || {}), user: null, setup: false }));
+    window.addEventListener("zoco-auth", onAuth);
+    return () => window.removeEventListener("zoco-auth", onAuth);
+  }, []);
+
+  if (session === undefined) return <p className="muted" style={{ padding: 24 }}>Loading workspace…</p>;
+  if (!session.user) {
+    return <Login setup={Boolean(session.setup)} onReady={(user) => setSession({ user, setup: false })} />;
+  }
 
   return (
     <div className={isStudio ? "app studio-mode" : "app"}>
@@ -133,6 +149,9 @@ export default function App() {
               {label}
             </NavLink>
           ))}
+          <button className="link-quiet" type="button" onClick={() => api.logout().then(() => setSession({ user: null, setup: false }))}>
+            Sign out {session.user?.email ? `(${session.user.email})` : ""}
+          </button>
         </div>
       </aside>
       )}

@@ -168,7 +168,7 @@ export function VariablesPanel({ agent, onChange, onInsert }) {
 
 export function ToolsPanel({ agent, onChange, bases }) {
   const [kind, setKind] = useState("system");
-  const [draft, setDraft] = useState({ name: "", description: "" });
+  const [draft, setDraft] = useState({ name: "", description: "", url: "", method: "POST", bodyTemplate: "{}" });
   const custom = customTools(agent);
 
   function addTool(event) {
@@ -177,9 +177,16 @@ export function ToolsPanel({ agent, onChange, bases }) {
     if (!name) return;
     onChange({
       ...agent,
-      customTools: [...custom, { id: `tool_${Date.now().toString(36)}`, name, description: draft.description.trim() }],
+      customTools: [...custom, {
+        id: `tool_${Date.now().toString(36)}`,
+        name,
+        description: draft.description.trim(),
+        url: draft.url.trim(),
+        method: draft.method || "POST",
+        bodyTemplate: draft.bodyTemplate || "{}",
+      }],
     });
-    setDraft({ name: "", description: "" });
+    setDraft({ name: "", description: "", url: "", method: "POST", bodyTemplate: "{}" });
     setKind("custom");
   }
 
@@ -234,6 +241,7 @@ export function ToolsPanel({ agent, onChange, bases }) {
                 <td>
                   <strong>{tool.name}</strong>
                   <p className="muted">{tool.description}</p>
+                  {tool.url ? <p className="muted">{tool.method || "POST"} {tool.url}</p> : <p className="muted">Add an https URL so this tool can run mid-call.</p>}
                 </td>
                 <td>Custom</td>
                 <td>
@@ -247,9 +255,16 @@ export function ToolsPanel({ agent, onChange, bases }) {
         </table>
       )}
       {kind === "custom" ? (
-        <form className="row add-row" onSubmit={addTool}>
+        <form className="grid add-row" onSubmit={addTool}>
           <input className="input" placeholder="Tool name" value={draft.name} onChange={(e) => setDraft({ ...draft, name: e.target.value })} />
           <input className="input" placeholder="What it should do on a call" value={draft.description} onChange={(e) => setDraft({ ...draft, description: e.target.value })} />
+          <input className="input" placeholder="https://api.example.com/lookup" value={draft.url} onChange={(e) => setDraft({ ...draft, url: e.target.value })} />
+          <select className="input" value={draft.method} onChange={(e) => setDraft({ ...draft, method: e.target.value })}>
+            <option>POST</option>
+            <option>GET</option>
+            <option>PUT</option>
+          </select>
+          <input className="input" placeholder='{"phone":"{{phone}}"}' value={draft.bodyTemplate} onChange={(e) => setDraft({ ...draft, bodyTemplate: e.target.value })} />
           <button className="btn" type="submit">Add tool</button>
         </form>
       ) : null}
@@ -489,6 +504,9 @@ export function SettingsPanel({
               </optgroup>
             ))}
           </select>
+        </SettingRow>
+        <SettingRow title="Warm transfer number" hint="Used by Transfer to human on live Twilio calls">
+          <input className="input" value={agent.transferNumber || ""} onChange={(e) => onChange({ ...agent, transferNumber: e.target.value })} placeholder="+91…" />
         </SettingRow>
         <SettingRow title="Model temperature" hint="Lower stays compliant and consistent; higher is more creative">
           <RangeControl min={0} max={1} step={0.05} value={settings.temperature} onChange={(temperature) => set({ temperature })} />

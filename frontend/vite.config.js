@@ -10,6 +10,8 @@ export default defineConfig({
     proxy: {
       "/api": "http://127.0.0.1:8787",
       "/webhooks": "http://127.0.0.1:8787",
+      "/embed": "http://127.0.0.1:8787",
+      "/widget": "http://127.0.0.1:8787",
     },
   },
   preview: {
@@ -19,6 +21,8 @@ export default defineConfig({
     proxy: {
       "/api": "http://127.0.0.1:8787",
       "/webhooks": "http://127.0.0.1:8787",
+      "/embed": "http://127.0.0.1:8787",
+      "/widget": "http://127.0.0.1:8787",
     },
   },
 });

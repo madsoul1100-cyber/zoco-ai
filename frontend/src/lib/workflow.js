@@ -5,6 +5,7 @@ function nid(prefix) {
 export const STAGE_TYPES = [
   { id: "greeting", label: "Greeting" },
   { id: "stage", label: "Conversation" },
+  { id: "condition", label: "Branch" },
   { id: "knowledge", label: "Query knowledge" },
   { id: "end", label: "End call" },
 ];

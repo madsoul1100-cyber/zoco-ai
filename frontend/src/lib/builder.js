@@ -42,6 +42,14 @@ export const SYSTEM_TOOLS = [
     description:
       "Invoke this when you need facts from attached knowledge bases — policies, product details, or FAQs. Do not invent answers from memory when a matching document exists.",
   },
+  {
+    id: "transfer_to_human",
+    name: "Transfer to human",
+    runs: "During call",
+    kind: "Built-in",
+    description:
+      "Warm-transfer the live Twilio call to the number in Settings. Speak a one-line handoff first.",
+  },
 ];
 
 export function callSettings(agent) {

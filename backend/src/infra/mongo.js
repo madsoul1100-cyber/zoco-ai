@@ -23,6 +23,9 @@ export async function connectMongo() {
     db.collection("calls").createIndex({ twilioSid: 1 }),
     db.collection("turns").createIndex({ callId: 1, timestamp: 1 }),
     db.collection("turns").createIndex({ createdAt: -1 }),
+    db.collection("users").createIndex({ email: 1 }, { unique: true }),
+    db.collection("agentVersions").createIndex({ agentId: 1, version: -1 }),
+    db.collection("calls").createIndex({ campaignId: 1, status: 1 }),
   ]);
   mongoState.ready = true;
   mongoState.error = null;

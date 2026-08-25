@@ -5,7 +5,8 @@
 
 import { detectLanguageFromText, detectRequestedLanguage, getLanguage } from "../languages.js";
 import { getAiSettings } from "../store.js";
-import { llmHeaders, resolveLlmConfig, speakerGender } from "./providers.js";
+import { fallbackLlmConfig, llmHeaders, resolveLlmConfig, speakerGender } from "./providers.js";
+import { openAiTools, runToolCall } from "./tools.js";
 
 const SLOT_PATTERNS = [
   { key: "name", re: /(?:i am|i'm|this is|my name is)\s+([A-Za-z][A-Za-z\s]{1,40})/i },
@@ -44,13 +45,19 @@ function compiledAgentInstructions(agent) {
 function workflowInstruction(agent) {
   const nodes = Array.isArray(agent?.workflow?.nodes) ? agent.workflow.nodes : [];
   if (!agent?.workflow?.enabled || !nodes.length) return "";
-  return `Call flow — move through these stages in order. Do not say stage names out loud.\n${nodes
-    .map((node, index) => {
-      const title = String(node?.title || `Stage ${index + 1}`).trim();
-      const body = String(node?.body || "").trim();
-      return `${index + 1}. ${title}${body ? `: ${body}` : ""}`;
-    })
-    .join("\n")}`;
+  const byId = Object.fromEntries(nodes.map((node) => [node.id, node]));
+  const lines = nodes.map((node, index) => {
+    const title = String(node?.title || `Stage ${index + 1}`).trim();
+    const body = String(node?.body || "").trim();
+    if (node.type === "condition") {
+      const yes = byId[node.yes]?.title || "next";
+      const no = byId[node.no]?.title || "end";
+      return `${index + 1}. BRANCH “${title}”: if the customer matches “${node.match || "yes"}” go to ${yes}, else ${no}. ${body}`;
+    }
+    const next = node.next && byId[node.next] ? ` → then ${byId[node.next].title}` : "";
+    return `${index + 1}. ${title}${body ? `: ${body}` : ""}${next}`;
+  });
+  return `Call flow — follow stages and branches. Do not say stage names out loud.\n${lines.join("\n")}`;
 }
 
 function languageInstruction(agent) {
@@ -101,7 +108,7 @@ export function buildModelMessages({ agent, history, userText, slots, knowledge 
       ? `After the call you must be able to fill these output variables from what was said: ${agent.outputVariables.map((item) => `${item.key} (${item.dataType || "string"}): ${item.prompt || ""}`).join("; ")}`
       : "",
     Array.isArray(agent.customTools) && agent.customTools.length
-      ? `Custom tools available (describe using them in speech only, never name the tool): ${agent.customTools.map((item) => item.name).join(", ")}`
+      ? `You may call HTTP tools when you need live data. Do not mention tool names. After a tool result, speak a short natural update.`
       : "",
     knowledge ? `Use this knowledge base only when the customer asks something factual. Never read it out as a list. Knowledge:\n${knowledge}` : "",
     slots && Object.keys(slots).length ? `Known details: ${JSON.stringify(slots)}` : "",
@@ -182,22 +189,53 @@ function withSpokenLanguage(agent, call) {
   return { ...agent, language: call?.language || agent?.language || "en-IN" };
 }
 
-export async function generateReply({ agent, call, userText, knowledge = "" }) {
+export async function generateReply({ agent, call, userText, knowledge = "", knowledgeFn }) {
   followCustomerLanguage(call, agent, userText);
   const speaking = withSpokenLanguage(agent, call);
   const history = call.messages || [];
   const slots = { ...(call.gathered || {}), ...extractSlots(history, userText) };
-  const llm = await resolveLlm(speaking);
+  const settings = await getAiSettings();
+  let llm = resolveLlmConfig(speaking, settings);
 
   if (llm) {
     try {
-      let full = "";
-      for await (const token of streamModelTokens({ agent: speaking, history, userText, slots, llm, knowledge })) {
-        full += token;
-      }
-      return { ...guardEarlyHangup(parseSpoken(full), call), slots, provider: llm.provider, model: llm.model };
+      const result = await completeWithTools({
+        agent: speaking,
+        call,
+        history,
+        userText,
+        slots,
+        llm,
+        knowledge,
+        knowledgeFn,
+      });
+      return { ...guardEarlyHangup(result, call), slots, provider: llm.provider, model: llm.model };
     } catch (error) {
       console.warn(`${llm.provider} fallback:`, error.message);
+      const backup = llm.provider === "openrouter" ? null : fallbackLlmConfig(settings);
+      if (backup) {
+        try {
+          const result = await completeWithTools({
+            agent: speaking,
+            call,
+            history,
+            userText,
+            slots,
+            llm: backup,
+            knowledge,
+            knowledgeFn,
+          });
+          return { ...guardEarlyHangup(result, call), slots, provider: backup.provider, model: backup.model };
+        } catch (retryError) {
+          console.warn(`${backup.provider} fallback:`, retryError.message);
+          return {
+            ...localReply({ agent: speaking, history, userText, slots }),
+            provider: "local",
+            model: null,
+            llmError: retryError.message,
+          };
+        }
+      }
       return {
         ...localReply({ agent: speaking, history, userText, slots }),
         provider: "local",
@@ -210,24 +248,87 @@ export async function generateReply({ agent, call, userText, knowledge = "" }) {
   return { ...localReply({ agent: speaking, history, userText, slots }), provider: "local", model: null };
 }
 
-export async function* streamModelTokens({ agent, history, userText, slots, llm, knowledge = "" }) {
+async function completeWithTools({ agent, call, history, userText, slots, llm, knowledge, knowledgeFn }) {
+  const tools = openAiTools(agent);
+  const messages = buildModelMessages({ agent, history, userText, slots, knowledge });
+  let data = await chatCompletion(llm, {
+    agent,
+    messages,
+    tools,
+    stream: false,
+  });
+  let extra = "";
+  let transfer = "";
+  let forcedEnd = null;
+  for (let step = 0; step < 4; step += 1) {
+    const calls = data.choices?.[0]?.message?.tool_calls || [];
+    if (!calls.length) break;
+    messages.push(data.choices[0].message);
+    for (const item of calls) {
+      const name = item.function?.name || "";
+      let args = {};
+      try {
+        args = JSON.parse(item.function?.arguments || "{}");
+      } catch {
+        args = {};
+      }
+      const ran = await runToolCall({
+        name,
+        args,
+        agent,
+        call,
+        slots,
+        knowledgeFn,
+      });
+      if (ran.transfer) transfer = ran.transfer;
+      if (ran.endCall) forcedEnd = ran.disposition || "success";
+      if (ran.say) extra = ran.say;
+      messages.push({
+        role: "tool",
+        tool_call_id: item.id,
+        content: ran.result || ran.say || JSON.stringify(ran),
+      });
+    }
+    data = await chatCompletion(llm, { agent, messages, tools, stream: false });
+  }
+  const content = data.choices?.[0]?.message?.content || extra;
+  const parsed = parseSpoken(content);
+  if (forcedEnd) {
+    parsed.endCall = true;
+    parsed.disposition = forcedEnd;
+  }
+  if (transfer) parsed.transfer = transfer;
+  return parsed;
+}
+
+async function chatCompletion(llm, { agent, messages, tools, stream }) {
+  const payload = {
+    model: llm.model,
+    temperature: Number(agent?.callSettings?.temperature ?? 0.35),
+    max_tokens: getLanguage(agent?.language).code === "en-IN" ? 90 : 140,
+    stream: Boolean(stream),
+    messages,
+  };
+  if (tools?.length && llm.provider !== "sarvam") payload.tools = tools;
   const response = await fetch(`${llm.baseUrl}/chat/completions`, {
     method: "POST",
     headers: llmHeaders(llm),
-    body: JSON.stringify({
-      model: llm.model,
-      temperature: Number(agent?.callSettings?.temperature ?? 0.35),
-      max_tokens: getLanguage(agent?.language).code === "en-IN" ? 90 : 140,
-      stream: true,
-      messages: buildModelMessages({ agent, history, userText, slots, knowledge }),
-    }),
+    body: JSON.stringify(payload),
   });
-
   if (!response.ok) {
     const raw = await response.text();
     throw new Error(`${llm.provider} ${response.status}: ${raw.slice(0, 400)}`);
   }
+  if (stream) return response;
+  return response.json();
+}
 
+export async function* streamModelTokens({ agent, history, userText, slots, llm, knowledge = "" }) {
+  const response = await chatCompletion(llm, {
+    agent,
+    messages: buildModelMessages({ agent, history, userText, slots, knowledge }),
+    stream: true,
+  });
   const reader = response.body.getReader();
   const decoder = new TextDecoder();
   let buffer = "";

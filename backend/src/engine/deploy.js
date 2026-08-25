@@ -31,24 +31,46 @@ export function hashCaller(phone) {
   return Math.abs(hash).toString(16).padStart(12, "0").slice(0, 12);
 }
 
-export function parseContactRows(rows = []) {
+export function parseContactRows(rows = [], columnMap = {}) {
+  const mapped = applyColumnMap(rows, columnMap);
   const valid = [];
   const invalid = [];
-  for (const item of rows) {
+  for (const item of mapped) {
     const phone = normalizePhone(item?.phone || item);
     if (!phone) {
       invalid.push(item);
       continue;
     }
+    const reserved = new Set(["id", "name", "phone", "notes", "cohortId", "vars"]);
+    const vars = { ...(item.vars || {}) };
+    for (const [key, value] of Object.entries(item)) {
+      if (reserved.has(key) || value == null || value === "") continue;
+      vars[key] = value;
+    }
     valid.push({
       id: item.id || `row_${uuid().slice(0, 6)}`,
-      name: item.name || "Customer",
+      name: item.name || vars.customer_name || "Customer",
       phone,
       notes: item.notes || "",
       cohortId: item.cohortId || "",
+      vars,
     });
   }
   return { valid, invalid };
+}
+
+export function applyColumnMap(rows = [], columnMap = {}) {
+  if (!columnMap || !Object.keys(columnMap).length) return rows;
+  return rows.map((row) => {
+    if (!row || typeof row !== "object") return row;
+    const next = { ...row };
+    for (const [target, source] of Object.entries(columnMap)) {
+      if (!source) continue;
+      const value = row[source] ?? row[target];
+      if (value != null && value !== "") next[target] = value;
+    }
+    return next;
+  });
 }
 
 export function ensureCampaignShape(campaign = {}) {
@@ -71,7 +93,9 @@ export function ensureCampaignShape(campaign = {}) {
   return {
     ...campaign,
     schedule: { ...defaultSchedule(), ...(campaign.schedule || {}) },
-    concurrency: Number(campaign.concurrency || 1),
+    concurrency: Math.max(1, Number(campaign.concurrency || 1)),
+    columnMap: campaign.columnMap && typeof campaign.columnMap === "object" ? campaign.columnMap : {},
+    agentVersion: campaign.agentVersion || null,
     cohorts,
     contacts: flattened,
   };
@@ -97,6 +121,7 @@ export function ensureInboundShape(item = {}, tel = {}) {
     connections: item.connections?.length
       ? item.connections
       : [{ phone: item.phoneNumber || tel.fromNumber || "" }].filter((row) => row.phone),
+    agentVersion: item.agentVersion || null,
     createdAt: item.createdAt || new Date().toISOString(),
     pausedAt: live ? null : item.pausedAt || item.updatedAt || null,
     updatedAt: item.updatedAt || null,

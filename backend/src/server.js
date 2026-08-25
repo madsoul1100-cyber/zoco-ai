@@ -6,6 +6,7 @@ import { generateReply, streamModelTokens, parseSpoken, extractSlots, guardEarly
 import { renderGreeting } from "./engine/template.js";
 import { applyOutcome, dashboardStats, DISPOSITIONS } from "./engine/rules.js";
 import { publicProviderCatalog, resolveLlmConfig } from "./engine/providers.js";
+import { sttReady, transcribeAudio, transcribeFromUrl } from "./engine/stt.js";
 import { getTtsClip, synthesizeSpeech } from "./engine/tts.js";
 import { translateText } from "./engine/translate.js";
 import { getLanguage, normalizeLanguage, publicLanguages, resolveSpokenLanguage, isNoiseTranscript } from "./languages.js";
@@ -15,7 +16,9 @@ import { startCallWorker } from "./infra/queue.js";
 import { getRecordingStream, uploadRecording } from "./infra/s3.js";
 import { loadEnv } from "./loadEnv.js";
 import { normalizePhone } from "./phone.js";
+import { authMiddleware, mountAuthRoutes } from "./routes/auth.js";
 import { mountProductRoutes } from "./routes/product.js";
+import { mountWidgetRoutes } from "./routes/widget.js";
 import {
   attachTurn,
   handleCallJob,
@@ -29,26 +32,34 @@ import {
   hangupTwiml,
   mapTwilioStatus,
   publicTelephony,
+  recordListenTwiml,
   resolveTelephony,
+  sendWhatsApp,
   syncInboundWebhook,
+  transferTwiml,
+  whatsappFromNumber,
 } from "./telephony/twilio.js";
 import {
+  commitAgentVersion,
   deleteAgent,
   deleteContact,
   ensureStore,
   getAgent,
   getAiSettings,
   getCall,
+  getCallAgent,
   getCallByTwilioSid,
   getContact,
   getInbound,
   getRules,
   getTelephony,
   knowledgeContextForAgent,
+  listAgentVersions,
   listAgents,
   listCalls,
   listContacts,
   listInbounds,
+  retargetGrokAgents,
   saveAgent,
   saveAiSettings,
   saveCall,
@@ -63,10 +74,13 @@ const upload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 30 
 const app = express();
 const PORT = Number(process.env.PORT || 8787);
 
-app.use(cors({ origin: true }));
+app.use(cors({ origin: true, credentials: true }));
 app.use(express.urlencoded({ extended: false }));
 app.use(express.json({ limit: "8mb" }));
+app.use(authMiddleware);
 
+mountAuthRoutes(app);
+mountWidgetRoutes(app);
 mountProductRoutes(app, { upload });
 
 app.get("/api/health", async (_req, res) => {
@@ -136,6 +150,20 @@ app.get("/api/tts/:id", async (req, res) => {
   if (!clip) return res.status(404).json({ error: "Voice clip not found" });
   res.setHeader("Content-Type", clip.contentType);
   res.send(clip.buffer);
+});
+
+app.post("/api/stt", upload.single("audio"), async (req, res) => {
+  if (!req.file?.buffer) return res.status(400).json({ error: "Audio file missing" });
+  try {
+    const transcript = await transcribeAudio(req.file.buffer, {
+      language: req.body?.language || "en-IN",
+      mime: req.file.mimetype || "audio/webm",
+      filename: req.file.originalname || "speech.webm",
+    });
+    res.json({ transcript, ready: await sttReady() });
+  } catch (error) {
+    res.status(400).json({ error: error.message });
+  }
 });
 
 app.post("/api/tts", async (req, res) => {
@@ -208,9 +236,15 @@ app.get("/api/agents", async (_req, res) => {
 });
 
 app.get("/api/agents/:id", async (req, res) => {
-  const agent = await getAgent(req.params.id);
+  const agent = await getAgent(req.params.id, req.query.version);
   if (!agent) return res.status(404).json({ error: "Agent not found" });
   res.json(agent);
+});
+
+app.get("/api/agents/:id/versions", async (req, res) => {
+  const agent = await getAgent(req.params.id);
+  if (!agent) return res.status(404).json({ error: "Agent not found" });
+  res.json(await listAgentVersions(req.params.id));
 });
 
 app.post("/api/agents", async (req, res) => {
@@ -231,11 +265,12 @@ app.post("/api/agents", async (req, res) => {
     language: normalizeLanguage(body.language),
     greetings: body.greetings && typeof body.greetings === "object" ? body.greetings : {},
     voice: body.voice || "Serena",
-    llmProvider: body.llmProvider || "",
-    llmModel: body.llmModel || "",
+    llmProvider: body.llmProvider || "openrouter",
+    llmModel: body.llmModel || process.env.OPENROUTER_MODEL || "google/gemini-2.5-flash",
     ttsProvider: body.ttsProvider || "browser",
     ttsModel: body.ttsModel || "",
     ttsVoice: body.ttsVoice || "",
+    transferNumber: body.transferNumber || "",
     knowledgeBaseIds: Array.isArray(body.knowledgeBaseIds) ? body.knowledgeBaseIds : [],
     category: body.category || "",
     status: body.status || "draft",
@@ -266,7 +301,10 @@ app.put("/api/agents/:id", async (req, res) => {
   if (!existing) return res.status(404).json({ error: "Agent not found" });
   const agent = { ...existing, ...req.body, id: existing.id, updatedAt: new Date().toISOString() };
   if (req.body?.language) agent.language = normalizeLanguage(req.body.language);
-  res.json(await saveAgent(agent));
+  const saved = await saveAgent(agent);
+  const bumped = Number(saved.version || 1) !== Number(existing.version || 1);
+  if (bumped || req.body?.commitVersion) await commitAgentVersion(saved);
+  res.json(saved);
 });
 
 app.delete("/api/agents/:id", async (req, res) => {
@@ -403,11 +441,12 @@ app.post("/api/calls", async (req, res) => {
   const now = new Date().toISOString();
   const scheduledAt = body.scheduledAt ? new Date(body.scheduledAt).toISOString() : null;
   const isScheduled = Boolean(scheduledAt && Date.parse(scheduledAt) > Date.now());
-  const channel = body.channel === "chat" ? "chat" : "voice";
+  const channel = body.channel === "chat" ? "chat" : body.channel === "whatsapp" ? "whatsapp" : "voice";
   const call = {
     id: `call_${uuid().slice(0, 10)}`,
     agentId: agent.id,
     agentName: agent.name,
+    agentVersion: Number(body.agentVersion || agent.version || 1),
     direction: body.direction || agent.direction,
     channel,
     customer,
@@ -456,6 +495,18 @@ app.post("/api/calls", async (req, res) => {
       await scheduleFollowUp(saved);
     } else if (body.mode === "phone") {
       saved = await queueOrDial(saved);
+    } else if (channel === "whatsapp") {
+      const tel = await resolveTelephony();
+      const greeting = renderGreeting(agent, customer) || agent.greeting || "Hi, this is Zoco.";
+      await attachTurn(saved, {
+        id: `msg_${uuid().slice(0, 8)}`,
+        role: "assistant",
+        text: greeting,
+        timestamp: new Date().toISOString(),
+        audioOffsetMs: null,
+      }, "whatsapp");
+      await sendWhatsApp({ tel, to: customer.phone, body: greeting });
+      saved = await saveCall(saved);
     }
     res.status(201).json(saved);
   } catch (error) {
@@ -495,7 +546,7 @@ app.post("/api/calls/:id/start", async (req, res) => {
 app.post("/api/calls/:id/connect", async (req, res) => {
   const call = await getCall(req.params.id);
   if (!call) return res.status(404).json({ error: "Call not found" });
-  const agent = await getAgent(call.agentId);
+  const agent = await getCallAgent(call);
   const alreadyGreeted = call.messages?.some((m) => m.role === "assistant");
   if (call.status === "in_progress" && alreadyGreeted) {
     return res.json(call);
@@ -525,7 +576,7 @@ app.post("/api/calls/:id/messages", async (req, res) => {
   const userText = String(req.body?.text || "").trim();
   if (!userText) return res.status(400).json({ error: "Message text is required" });
 
-  const agent = await getAgent(call.agentId);
+  const agent = await getCallAgent(call);
   const source = req.body?.source || inferSource(call);
   const now = new Date().toISOString();
   call.status = "in_progress";
@@ -537,7 +588,13 @@ app.post("/api/calls/:id/messages", async (req, res) => {
     audioOffsetMs: req.body?.audioOffsetMs ?? null,
   }, source);
 
-  const reply = await generateReply({ agent, call, userText, knowledge: await knowledgeContextForAgent(agent, userText) });
+  const reply = await generateReply({
+    agent,
+    call,
+    userText,
+    knowledge: await knowledgeContextForAgent(agent, userText),
+    knowledgeFn: (ag, q) => knowledgeContextForAgent(ag, q),
+  });
   call.gathered = { ...(call.gathered || {}), ...(reply.slots || {}) };
   call.llm = { provider: reply.provider, model: reply.model || null };
   await attachTurn(call, {
@@ -581,7 +638,7 @@ app.post("/api/calls/:id/messages/stream", async (req, res) => {
   const userText = String(req.body?.text || "").trim();
   if (!userText) return res.status(400).json({ error: "Message text is required" });
 
-  const agent = await getAgent(call.agentId);
+  const agent = await getCallAgent(call);
   const llm = await resolveLlm(agent);
   const source = req.body?.source || inferSource(call);
   res.setHeader("Content-Type", "text/event-stream");
@@ -622,7 +679,13 @@ app.post("/api/calls/:id/messages/stream", async (req, res) => {
       reply = { ...guardEarlyHangup(parseSpoken(full), call), slots, provider: llm.provider, model: llm.model };
       if (!reply.text) reply.text = String(full).replace(/\[END:[a-z_]+\]/gi, "").trim();
     } else {
-      reply = await generateReply({ agent, call, userText });
+      reply = await generateReply({
+        agent,
+        call,
+        userText,
+        knowledge: await knowledgeContextForAgent(agent, userText),
+        knowledgeFn: (ag, q) => knowledgeContextForAgent(ag, q),
+      });
       emit({ type: "delta", text: reply.text });
     }
 
@@ -741,7 +804,7 @@ function sendTwiml(res, xml) {
   res.send(xml);
 }
 
-async function spokenTwiml({ agent, say, language, actionUrl, hangup = false, record = false, callId }) {
+async function spokenTwiml({ agent, say, language, actionUrl, hangup = false, record = false, callId, transferTo }) {
   const tel = await resolveTelephony();
   const spokenLanguage = language || agent?.language || "en-IN";
   let audioUrl = null;
@@ -757,11 +820,40 @@ async function spokenTwiml({ agent, say, language, actionUrl, hangup = false, re
     console.warn("TTS fallback to Twilio Say:", error.message);
   }
   if (hangup) return hangupTwiml({ say, language: spokenLanguage, audioUrl });
+  if (transferTo) {
+    return transferTwiml({
+      say,
+      language: spokenLanguage,
+      audioUrl,
+      toNumber: transferTo,
+      callerId: tel.fromNumber,
+    });
+  }
   const recordingCallbackUrl =
     record && callId
       ? `${tel.publicBaseUrl}/webhooks/twilio/recording?callId=${encodeURIComponent(callId)}`
       : "";
+  if (await sttReady()) {
+    return recordListenTwiml({ say, actionUrl, language: spokenLanguage, audioUrl, recordingCallbackUrl });
+  }
   return gatherTwiml({ say, actionUrl, language: spokenLanguage, audioUrl, recordingCallbackUrl });
+}
+
+async function speechFromTwilio(req, language) {
+  const spoken = String(req.body?.SpeechResult || req.body?.UnstableSpeechResult || "").trim();
+  if (spoken) return spoken;
+  const recordingUrl = req.body?.RecordingUrl;
+  if (!recordingUrl) return "";
+  const tel = await resolveTelephony();
+  try {
+    return await transcribeFromUrl(`${recordingUrl}.wav`, {
+      language,
+      authHeader: `Basic ${Buffer.from(`${tel.accountSid}:${tel.authToken}`).toString("base64")}`,
+    });
+  } catch (error) {
+    console.warn("Sarvam STT failed:", error.message);
+    return "";
+  }
 }
 
 async function findCallFromTwilio(req) {
@@ -798,7 +890,7 @@ async function handleInboundCall(req, res) {
   if (!twilioSid) {
     return sendTwiml(res, hangupTwiml({ say: "", language: "en-IN" }));
   }
-  const agent = inbound.enabled ? await getAgent(inbound.agentId) : null;
+  const agent = inbound.enabled ? await getAgent(inbound.agentId, inbound.agentVersion) : null;
   const language = normalizeLanguage(agent?.language);
   const spoken = getLanguage(language);
   if (!agent) {
@@ -823,6 +915,7 @@ async function handleInboundCall(req, res) {
     id: `call_${uuid().slice(0, 10)}`,
     agentId: agent.id,
     agentName: agent.name,
+    agentVersion: inbound.agentVersion || agent.version || 1,
     inboundId: inbound.inboundId || inbound.id || "",
     toNumber: to || inbound.phoneNumber || "",
     direction: "inbound",
@@ -871,7 +964,7 @@ async function handleInboundCall(req, res) {
 app.post("/webhooks/twilio/voice", async (req, res) => {
   const callId = req.query.callId || req.body?.callId;
   const call = await getCall(callId);
-  const agent = call ? await getAgent(call.agentId) : null;
+  const agent = call ? await getCallAgent(call) : null;
   const language = resolveSpokenLanguage(call, agent);
   const spoken = getLanguage(language);
   if (!call) return sendTwiml(res, hangupTwiml({ say: spoken.inactive, language }));
@@ -901,18 +994,15 @@ app.post("/webhooks/twilio/gather", async (req, res) => {
   const callId = req.query.callId || req.body?.callId;
   const call = await getCall(callId);
   const tel = await resolveTelephony();
-  const agent = call ? await getAgent(call.agentId) : null;
+  const agent = call ? await getCallAgent(call) : null;
   const startLanguage = resolveSpokenLanguage(call, agent);
   const spokenLang = getLanguage(startLanguage);
   if (!call) return sendTwiml(res, hangupTwiml({ say: spokenLang.inactive, language: startLanguage }));
   const actionUrl = `${tel.publicBaseUrl}/webhooks/twilio/gather?callId=${encodeURIComponent(call.id)}`;
-  const spoken = String(req.body?.SpeechResult || req.body?.UnstableSpeechResult || "").trim();
+  const spoken = await speechFromTwilio(req, startLanguage);
 
   if (!spoken || isNoiseTranscript(spoken, call.messages?.filter((m) => m.role === "assistant").at(-1)?.text)) {
-    return sendTwiml(
-      res,
-      gatherTwiml({ say: spokenLang.missed, actionUrl, language: startLanguage })
-    );
+    return sendTwiml(res, await spokenTwiml({ agent, say: spokenLang.missed, language: startLanguage, actionUrl }));
   }
 
   await attachTurn(call, {
@@ -922,7 +1012,13 @@ app.post("/webhooks/twilio/gather", async (req, res) => {
     timestamp: new Date().toISOString(),
     audioOffsetMs: null,
   }, "telephony");
-  const reply = await generateReply({ agent, call, userText: spoken, knowledge: await knowledgeContextForAgent(agent, spoken) });
+  const reply = await generateReply({
+    agent,
+    call,
+    userText: spoken,
+    knowledge: await knowledgeContextForAgent(agent, spoken),
+    knowledgeFn: (ag, q) => knowledgeContextForAgent(ag, q),
+  });
   const language = resolveSpokenLanguage(call, agent);
   call.gathered = { ...(call.gathered || {}), ...(reply.slots || {}) };
   call.llm = { provider: reply.provider, model: reply.model || null };
@@ -934,6 +1030,16 @@ app.post("/webhooks/twilio/gather", async (req, res) => {
     audioOffsetMs: null,
     provider: reply.provider,
   }, "telephony");
+
+  if (reply.transfer) {
+    await saveCall(call);
+    return sendTwiml(res, await spokenTwiml({
+      agent,
+      say: reply.text || "Please stay on the line.",
+      language,
+      transferTo: reply.transfer,
+    }));
+  }
 
   if (reply.endCall) {
     const rules = await getRules();
@@ -1028,6 +1134,79 @@ app.post("/webhooks/twilio/recording", async (req, res) => {
   res.sendStatus(204);
 });
 
+app.post("/webhooks/twilio/whatsapp", handleWhatsApp);
+app.post("/webhooks/twilio/sms", handleWhatsApp);
+
+async function handleWhatsApp(req, res) {
+  const from = whatsappFromNumber(req.body?.From);
+  const to = whatsappFromNumber(req.body?.To);
+  const body = String(req.body?.Body || "").trim();
+  res.setHeader("Content-Type", "text/xml");
+  if (!from || !body) return res.send("<Response></Response>");
+  const inbound = await resolveInboundLine(to);
+  const agent = inbound.enabled ? await getAgent(inbound.agentId, inbound.agentVersion) : null;
+  if (!agent) {
+    return res.send("<Response><Message>This WhatsApp line is not answering right now.</Message></Response>");
+  }
+  const existing = (await listCalls()).find(
+    (item) => item.channel === "whatsapp" && normalizePhone(item.customer?.phone) === from && ["in_progress", "ringing"].includes(item.status)
+  );
+  const now = new Date().toISOString();
+  const call = existing || {
+    id: `call_${uuid().slice(0, 10)}`,
+    agentId: agent.id,
+    agentName: agent.name,
+    agentVersion: inbound.agentVersion || agent.version || 1,
+    inboundId: inbound.inboundId || inbound.id || "",
+    direction: "inbound",
+    channel: "whatsapp",
+    customer: { name: from, phone: from },
+    status: "in_progress",
+    disposition: "in_progress",
+    attempt: 1,
+    startedAt: now,
+    gathered: {},
+    language: agent.language || "en-IN",
+    createdAt: now,
+    messages: [],
+  };
+  await attachTurn(call, {
+    id: `msg_${uuid().slice(0, 8)}`,
+    role: "user",
+    text: body,
+    timestamp: now,
+    audioOffsetMs: null,
+  }, "whatsapp");
+  const reply = await generateReply({
+    agent,
+    call,
+    userText: body,
+    knowledge: await knowledgeContextForAgent(agent, body),
+    knowledgeFn: (ag, q) => knowledgeContextForAgent(ag, q),
+  });
+  call.gathered = { ...(call.gathered || {}), ...(reply.slots || {}) };
+  await attachTurn(call, {
+    id: `msg_${uuid().slice(0, 8)}`,
+    role: "assistant",
+    text: reply.text,
+    timestamp: new Date().toISOString(),
+    audioOffsetMs: null,
+    provider: reply.provider,
+  }, "whatsapp");
+  if (reply.endCall) {
+    const next = applyOutcome(
+      call,
+      { status: "completed", disposition: reply.disposition || agent.defaultSuccessDisposition, reason: "WhatsApp closed" },
+      await getRules()
+    );
+    await saveCall(next);
+  } else {
+    await saveCall(call);
+  }
+  const safe = String(reply.text || "").replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+  res.send(`<Response><Message>${safe}</Message></Response>`);
+}
+
 app.use((error, _req, res, _next) => {
   console.error(error);
   res.status(500).json({ error: error.message || "Server error" });
@@ -1036,6 +1215,7 @@ app.use((error, _req, res, _next) => {
 const boot = async () => {
   const infra = await connectInfra();
   await ensureStore();
+  await retargetGrokAgents().catch((error) => console.warn("Grok retarget skipped:", error.message));
   startCallWorker(handleCallJob);
   const agents = await listAgents();
   if (agents.length === 0) {

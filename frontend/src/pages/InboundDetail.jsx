@@ -11,7 +11,7 @@ export default function InboundDetail() {
   const [error, setError] = useState("");
   const [busy, setBusy] = useState(false);
   const [editOpen, setEditOpen] = useState(false);
-  const [form, setForm] = useState({ name: "", agentId: "", phoneNumber: "", start: "", end: "", days: "", timezone: "" });
+  const [form, setForm] = useState({ name: "", agentId: "", agentVersion: "", phoneNumber: "", start: "", end: "", days: "", timezone: "" });
 
   async function refresh() {
     const [detail, agentList] = await Promise.all([api.inboundDetail(id), api.agents()]);
@@ -20,6 +20,7 @@ export default function InboundDetail() {
     setForm({
       name: detail.name || "",
       agentId: detail.agentId || "",
+      agentVersion: detail.agentVersion || "",
       phoneNumber: detail.phoneNumber || "",
       start: detail.schedule?.start || "00:00:00",
       end: detail.schedule?.end || "23:59:00",
@@ -51,6 +52,7 @@ export default function InboundDetail() {
       await api.updateInbound(id, {
         name: form.name,
         agentId: form.agentId,
+        agentVersion: form.agentVersion ? Number(form.agentVersion) : null,
         phoneNumber: form.phoneNumber,
         schedule: { start: form.start, end: form.end, days: form.days, timezone: form.timezone },
       });
@@ -115,6 +117,7 @@ export default function InboundDetail() {
           <div>
             <span className="stat-label">Agent</span>
             <Link to={`/agents/${item.agentId}`}>{item.agentName || "Unassigned"}</Link>
+            <p className="muted">v{item.agentVersion || "latest"}</p>
           </div>
           <div>
             <span className="stat-label">Connection</span>
@@ -177,12 +180,16 @@ export default function InboundDetail() {
           <label>Name<input className="input" value={form.name} onChange={(e) => setForm({ ...form, name: e.target.value })} /></label>
           <label>
             Agent
-            <select className="input" value={form.agentId} onChange={(e) => setForm({ ...form, agentId: e.target.value })}>
+            <select className="input" value={form.agentId} onChange={(e) => {
+              const agent = agents.find((item) => item.id === e.target.value);
+              setForm({ ...form, agentId: e.target.value, agentVersion: agent?.version || form.agentVersion });
+            }}>
               {agents.map((agent) => (
-                <option key={agent.id} value={agent.id}>{agent.name}</option>
+                <option key={agent.id} value={agent.id}>{agent.name} (v{agent.version || 1})</option>
               ))}
             </select>
           </label>
+          <label>Pin version<input className="input" type="number" min="1" value={form.agentVersion} onChange={(e) => setForm({ ...form, agentVersion: e.target.value })} /></label>
           <label>Phone<input className="input" value={form.phoneNumber} onChange={(e) => setForm({ ...form, phoneNumber: e.target.value })} /></label>
           <label>Start<input className="input" value={form.start} onChange={(e) => setForm({ ...form, start: e.target.value })} /></label>
           <label>End<input className="input" value={form.end} onChange={(e) => setForm({ ...form, end: e.target.value })} /></label>

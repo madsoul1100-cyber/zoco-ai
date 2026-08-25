@@ -216,6 +216,39 @@ export function gatherTwiml({ say, actionUrl, language = "en-IN", audioUrl, reco
 </Response>`;
 }
 
+export function recordListenTwiml({ say, actionUrl, language = "en-IN", audioUrl, recordingCallbackUrl }) {
+  const voice = sayVoice(language);
+  const prompt = audioUrl
+    ? `<Play>${xmlEscape(audioUrl)}</Play>`
+    : `<Say language="${voice.language}" voice="${voice.voice}">${xmlEscape(spokenForTts(say))}</Say>`;
+  const start = recordingCallbackUrl
+    ? `<Start><Recording recordingStatusCallback="${xmlEscape(recordingCallbackUrl)}" recordingStatusCallbackMethod="POST" recordingStatusCallbackEvent="completed" /></Start>`
+    : "";
+  return `<?xml version="1.0" encoding="UTF-8"?>
+<Response>
+  ${start}
+  ${prompt}
+  <Record action="${xmlEscape(actionUrl)}" method="POST" maxLength="8" timeout="2" playBeep="false" transcribe="false" />
+</Response>`;
+}
+
+export function transferTwiml({ say, language = "en-IN", audioUrl, toNumber, callerId }) {
+  const voice = sayVoice(language);
+  const prompt = audioUrl
+    ? `<Play>${xmlEscape(audioUrl)}</Play>`
+    : say
+      ? `<Say language="${voice.language}" voice="${voice.voice}">${xmlEscape(spokenForTts(say))}</Say>`
+      : "";
+  return `<?xml version="1.0" encoding="UTF-8"?>
+<Response>
+  ${prompt}
+  <Dial callerId="${xmlEscape(callerId || "")}" timeout="30">
+    <Number>${xmlEscape(toNumber)}</Number>
+  </Dial>
+  <Hangup/>
+</Response>`;
+}
+
 export function hangupTwiml({ say, language = "en-IN", audioUrl }) {
   const voice = sayVoice(language);
   const prompt = audioUrl
@@ -270,4 +303,24 @@ export function mapTwilioStatus(status) {
   if (value === "failed" || value === "canceled") return { status: "failed", disposition: "failed" };
   if (value === "completed") return { status: "completed", disposition: null };
   return null;
+}
+
+export async function sendWhatsApp({ tel, to, body }) {
+  const dest = String(to || "").startsWith("whatsapp:") ? to : `whatsapp:${normalizePhone(to)}`;
+  const from = process.env.TWILIO_WHATSAPP_FROM || `whatsapp:${tel.fromNumber}`;
+  const response = await fetch(`https://api.twilio.com/2010-04-01/Accounts/${tel.accountSid}/Messages.json`, {
+    method: "POST",
+    headers: {
+      Authorization: twilioAuth(tel),
+      "Content-Type": "application/x-www-form-urlencoded",
+    },
+    body: new URLSearchParams({ To: dest, From: from, Body: body }),
+  });
+  const data = await response.json().catch(() => ({}));
+  if (!response.ok) throw new Error(data.message || `WhatsApp send failed (${response.status})`);
+  return data;
+}
+
+export function whatsappFromNumber(from) {
+  return normalizePhone(String(from || "").replace(/^whatsapp:/i, ""));
 }
