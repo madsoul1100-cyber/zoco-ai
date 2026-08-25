@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 import { api } from "../api.js";
+import { withSpokenGreeting } from "../lib/greetingTranslate.js";
 import { LANGUAGES, languageLabel } from "../lib/languages.js";
 import { brainKey, mergeLlmCatalog, parseBrain, voiceGender } from "../lib/providers.js";
 import { loadVoices, pickVoice, speakText, playAudio, voicesForLang, spokenForTts } from "../lib/voice.js";
@@ -13,7 +14,10 @@ export function AgentEditor({
   actions,
   submitLabel = "Save agent",
   busy = false,
+  embedded = false,
+  hide = [],
 }) {
+  const show = (key) => !hide.includes(key);
   const [catalog, setCatalog] = useState(null);
   const [bases, setBases] = useState([]);
   const [allVoices, setAllVoices] = useState([]);
@@ -100,57 +104,15 @@ export function AgentEditor({
   const gender = voiceGender(catalog, agent);
 
   async function applySpokenGreeting(nextAgent, { language, gender: nextGender } = {}) {
-    const current = nextAgent || agent;
-    const lang = language || current.language || "en-IN";
-    const spokenGender = nextGender || voiceGender(catalog, current);
-    const greetings = { ...(current.greetings || {}) };
-    if (!greetings["en-IN"] && /^[\x00-\x7F\s.,'"’-]+$/.test(current.greeting || "")) {
-      greetings["en-IN"] = current.greeting;
-    }
-    if (lang === "en-IN") {
-      onChange({
-        ...current,
-        language: lang,
-        greeting: greetings["en-IN"] || current.greeting,
-        greetings,
-        greetingGender: spokenGender,
-      });
-      return;
-    }
-    const cacheKey = `${lang}:${spokenGender}`;
-    if (greetings[cacheKey]) {
-      onChange({ ...current, language: lang, greeting: greetings[cacheKey], greetings, greetingGender: spokenGender });
-      return;
-    }
-    const source = greetings["en-IN"] || "";
-    if (!source.trim()) {
-      onChange({ ...current, language: lang, greetings, greetingGender: spokenGender });
-      return;
-    }
     setTranslating(true);
     onError?.("");
-    try {
-      const result = await api.translate({
-        text: source,
-        from: "en-IN",
-        to: lang,
-        speakerGender: spokenGender,
-      });
-      greetings[cacheKey] = result.text;
-      greetings[lang] = result.text;
-      onChange({
-        ...current,
-        language: lang,
-        greeting: result.text,
-        greetings,
-        greetingGender: spokenGender,
-      });
-    } catch (err) {
-      onChange({ ...current, language: lang, greetings, greetingGender: spokenGender });
-      onError?.(err.message || "Could not translate the greeting.");
-    } finally {
-      setTranslating(false);
-    }
+    const { agent: next, error } = await withSpokenGreeting(nextAgent || agent, catalog, {
+      language,
+      gender: nextGender,
+    });
+    onChange(next);
+    if (error) onError?.(error.message || "Could not translate the greeting.");
+    setTranslating(false);
   }
 
   async function changeLanguage(nextCode) {
@@ -194,199 +156,236 @@ export function AgentEditor({
     await onSubmit?.(payload);
   }
 
-  return (
-    <form className="card grid" onSubmit={handleSubmit}>
+  const fields = (
+    <>
       {extra}
-      <label>
-        Name
-        <input className="input" value={agent.name || ""} onChange={(e) => onChange({ ...agent, name: e.target.value })} />
-      </label>
-      <label>
-        Direction
-        <select className="input" value={agent.direction || "inbound"} onChange={(e) => onChange({ ...agent, direction: e.target.value })}>
-          <option value="inbound">Inbound — answers when a customer calls</option>
-          <option value="outbound">Outbound — dials customers</option>
-        </select>
-      </label>
-      <label>
-        Persona
-        <textarea value={agent.persona || ""} onChange={(e) => onChange({ ...agent, persona: e.target.value })} />
-      </label>
-      <label>
-        Greeting
-        <textarea
-          value={agent.greeting || ""}
-          onChange={(e) => onChange({
-            ...agent,
-            greeting: e.target.value,
-            greetings: { ...(agent.greetings || {}), [agent.language || "en-IN"]: e.target.value },
-          })}
-        />
-      </label>
-      <label>
-        AI brain
-        <select
-          className="input"
-          value={brainKey(brainProvider, brainModel)}
-          onChange={(e) => onChange({ ...agent, ...parseBrain(e.target.value) })}
-        >
-          {llmList.map((item) => (
-            <optgroup key={item.id} label={`${item.label}${item.ready === false ? " — add key in Settings" : ""}`}>
-              {item.models.map((model) => (
-                <option key={`${item.id}::${model.id}`} value={brainKey(item.id, model.id)}>
-                  {model.label}
-                </option>
-              ))}
-            </optgroup>
-          ))}
-        </select>
-        <span className="muted">Sarvam, Grok, OpenAI, and OpenRouter are all in this list. Keys live in Settings.</span>
-      </label>
-      <label>
-        Spoken language
-        <select
-          className="input"
-          value={agent.language || "en-IN"}
-          disabled={translating}
-          onChange={(e) => changeLanguage(e.target.value)}
-        >
-          {LANGUAGES.map((lang) => (
-            <option key={lang.code} value={lang.code}>
-              {languageLabel(lang.code)}
-            </option>
-          ))}
-        </select>
-        <span className="muted">
-          {translating
-            ? "Translating your English greeting…"
-            : "Write the greeting in English. Changing language translates it automatically. On a live call the agent follows the customer."}
-        </span>
-      </label>
-      <label>
-        Voice engine
-        <select
-          className="input"
-          value={agent.ttsProvider || "browser"}
-          onChange={(e) => {
-            const ttsProvider = e.target.value;
-            const spec = catalog?.tts?.find((item) => item.id === ttsProvider);
-            const first = spec?.voices?.[0];
-            changeVoice({
-              ttsProvider,
-              ttsVoice: first?.id || "",
-              ttsModel: first?.model || spec?.model || "",
-            });
-          }}
-        >
-          {(catalog?.tts || []).map((item) => (
-            <option key={item.id} value={item.id}>
-              {item.label}{item.ready ? "" : " — add key"}
-            </option>
-          ))}
-        </select>
-      </label>
-      <label>
-        Spoken voice
-        {agent.ttsProvider && agent.ttsProvider !== "browser" ? (
+      {show("name") ? (
+        <label>
+          Name
+          <input className="input" value={agent.name || ""} onChange={(e) => onChange({ ...agent, name: e.target.value })} />
+        </label>
+      ) : null}
+      {show("direction") ? (
+        <label>
+          Direction
+          <select className="input" value={agent.direction || "inbound"} onChange={(e) => onChange({ ...agent, direction: e.target.value })}>
+            <option value="inbound">Inbound — answers when a customer calls</option>
+            <option value="outbound">Outbound — dials customers</option>
+          </select>
+        </label>
+      ) : null}
+      {show("persona") ? (
+        <label>
+          Persona
+          <textarea value={agent.persona || ""} onChange={(e) => onChange({ ...agent, persona: e.target.value, instructions: e.target.value })} />
+        </label>
+      ) : null}
+      {show("greeting") ? (
+        <label>
+          Greeting
+          <textarea
+            value={agent.greeting || ""}
+            onChange={(e) => onChange({
+              ...agent,
+              greeting: e.target.value,
+              greetings: { ...(agent.greetings || {}), [agent.language || "en-IN"]: e.target.value },
+            })}
+          />
+        </label>
+      ) : null}
+      {show("brain") ? (
+        <label>
+          AI brain
           <select
             className="input"
-            value={agent.ttsVoice || ""}
-            onChange={(e) => {
-              const ttsVoice = e.target.value;
-              const spec = catalog?.tts?.find((item) => item.id === agent.ttsProvider);
-              const voice = spec?.voices?.find((item) => item.id === ttsVoice);
-              changeVoice({ ttsVoice, ttsModel: voice?.model || spec?.model || agent.ttsModel || "" });
-            }}
+            value={brainKey(brainProvider, brainModel)}
+            onChange={(e) => onChange({ ...agent, ...parseBrain(e.target.value) })}
           >
-            {(catalog?.tts?.find((item) => item.id === agent.ttsProvider)?.voices || []).map((voice) => (
-              <option key={voice.id} value={voice.id}>{voice.label}</option>
+            {llmList.map((item) => (
+              <optgroup key={item.id} label={`${item.label}${item.ready === false ? " — add key in Settings" : ""}`}>
+                {item.models.map((model) => (
+                  <option key={`${item.id}::${model.id}`} value={brainKey(item.id, model.id)}>
+                    {model.label}
+                  </option>
+                ))}
+              </optgroup>
             ))}
           </select>
-        ) : (
-          <select className="input" value={voiceName} onChange={(e) => setVoiceName(e.target.value)}>
-            {voices.length === 0 ? <option value="">Loading voices…</option> : null}
-            {voices.map((voice) => (
-              <option key={voice.name} value={voice.name}>
-                {voice.name} ({voice.lang})
+          <span className="muted">Sarvam, Grok, OpenAI, and OpenRouter are all in this list. Keys live in Settings.</span>
+        </label>
+      ) : null}
+      {show("language") ? (
+        <label>
+          Spoken language
+          <select
+            className="input"
+            value={agent.language || "en-IN"}
+            disabled={translating}
+            onChange={(e) => changeLanguage(e.target.value)}
+          >
+            {LANGUAGES.map((lang) => (
+              <option key={lang.code} value={lang.code}>
+                {languageLabel(lang.code)}
               </option>
             ))}
           </select>
-        )}
-        <span className="muted">
-          {gender === "male"
-            ? "This is a male voice. Hindi will use masculine forms such as करूंगा, not करूंगी."
-            : "This is a female voice. Hindi will use feminine forms such as करूंगी, not करूंगा."}
-        </span>
-      </label>
-      <button
-        className="btn ghost"
-        type="button"
-        disabled={previewing}
-        onClick={async () => {
-          const sample = spokenForTts(agent.greeting || "Hi, this is Zoco. How can I help?");
-          onError?.("");
-          setPreviewing(true);
-          window.speechSynthesis?.cancel();
-          try {
-            if ((agent.ttsProvider || "browser") === "browser") {
-              await speakText(sample, { voice: voiceRef.current, lang: agent.language || "en-IN" });
-              return;
-            }
-            const clip = await api.speak({
-              text: sample,
-              agentId: agent.id,
-              ttsProvider: agent.ttsProvider,
-              ttsVoice: agent.ttsVoice,
-              ttsModel: agent.ttsModel,
-              language: agent.language,
-            });
-            if (clip?.provider === "browser" || !clip?.audioUrl) {
-              throw new Error("This voice needs a Sarvam or OpenAI key in Settings.");
-            }
-            await playAudio(clip.audioUrl);
-          } catch (err) {
-            onError?.(err.message);
-          } finally {
-            setPreviewing(false);
-          }
-        }}
-      >
-        {previewing ? "Playing selected voice…" : "Preview voice"}
-      </button>
-      <label>
-        Success criteria
-        <textarea value={agent.successCriteria || ""} onChange={(e) => onChange({ ...agent, successCriteria: e.target.value })} />
-      </label>
-      <label>
-        Knowledge bases
-        <div className="kb-list">
-          {bases.length === 0 ? <span className="muted">Create a knowledge base first.</span> : null}
-          {bases.map((kb) => {
-            const checked = (agent.knowledgeBaseIds || []).includes(kb.id);
-            return (
-              <label key={kb.id}>
-                <input
-                  type="checkbox"
-                  checked={checked}
-                  onChange={() => {
-                    const current = agent.knowledgeBaseIds || [];
-                    const knowledgeBaseIds = checked
-                      ? current.filter((id) => id !== kb.id)
-                      : [...current, kb.id];
-                    onChange({ ...agent, knowledgeBaseIds });
-                  }}
-                />
-                {kb.name}
-              </label>
-            );
-          })}
+          <span className="muted">
+            {translating
+              ? "Translating your English greeting…"
+              : "Write the greeting in English. Changing language translates it automatically. On a live call the agent follows the customer."}
+          </span>
+        </label>
+      ) : null}
+      {show("voice") ? (
+        <>
+          <label>
+            Voice engine
+            <select
+              className="input"
+              value={agent.ttsProvider || "browser"}
+              onChange={(e) => {
+                const ttsProvider = e.target.value;
+                const spec = catalog?.tts?.find((item) => item.id === ttsProvider);
+                const first = spec?.voices?.[0];
+                changeVoice({
+                  ttsProvider,
+                  ttsVoice: first?.id || "",
+                  ttsModel: first?.model || spec?.model || "",
+                });
+              }}
+            >
+              {(catalog?.tts || []).map((item) => (
+                <option key={item.id} value={item.id}>
+                  {item.label}{item.ready ? "" : " — add key"}
+                </option>
+              ))}
+            </select>
+          </label>
+          <label>
+            Spoken voice
+            {agent.ttsProvider && agent.ttsProvider !== "browser" ? (
+              <select
+                className="input"
+                value={agent.ttsVoice || ""}
+                onChange={(e) => {
+                  const ttsVoice = e.target.value;
+                  const spec = catalog?.tts?.find((item) => item.id === agent.ttsProvider);
+                  const voice = spec?.voices?.find((item) => item.id === ttsVoice);
+                  changeVoice({ ttsVoice, ttsModel: voice?.model || spec?.model || agent.ttsModel || "" });
+                }}
+              >
+                {(catalog?.tts?.find((item) => item.id === agent.ttsProvider)?.voices || []).map((voice) => (
+                  <option key={voice.id} value={voice.id}>{voice.label}</option>
+                ))}
+              </select>
+            ) : (
+              <select
+                className="input"
+                value={voiceName}
+                onChange={(e) => {
+                  setVoiceName(e.target.value);
+                  onChange({ ...agent, voice: e.target.value });
+                }}
+              >
+                {voices.length === 0 ? <option value="">Loading voices…</option> : null}
+                {voices.map((voice) => (
+                  <option key={voice.name} value={voice.name}>
+                    {voice.name} ({voice.lang})
+                  </option>
+                ))}
+              </select>
+            )}
+            <span className="muted">
+              {gender === "male"
+                ? "This is a male voice. Hindi will use masculine forms such as करूंगा, not करूंगी."
+                : "This is a female voice. Hindi will use feminine forms such as करूंगी, not करूंगा."}
+            </span>
+          </label>
+          <button
+            className="btn ghost"
+            type="button"
+            disabled={previewing}
+            onClick={async () => {
+              const sample = spokenForTts(agent.greeting || "Hi, this is Zoco. How can I help?");
+              onError?.("");
+              setPreviewing(true);
+              window.speechSynthesis?.cancel();
+              try {
+                if ((agent.ttsProvider || "browser") === "browser") {
+                  await speakText(sample, { voice: voiceRef.current, lang: agent.language || "en-IN" });
+                  return;
+                }
+                const clip = await api.speak({
+                  text: sample,
+                  agentId: agent.id,
+                  ttsProvider: agent.ttsProvider,
+                  ttsVoice: agent.ttsVoice,
+                  ttsModel: agent.ttsModel,
+                  language: agent.language,
+                  callSettings: agent.callSettings,
+                });
+                if (clip?.provider === "browser" || !clip?.audioUrl) {
+                  throw new Error("This voice needs a Sarvam or OpenAI key in Settings.");
+                }
+                await playAudio(clip.audioUrl);
+              } catch (err) {
+                onError?.(err.message);
+              } finally {
+                setPreviewing(false);
+              }
+            }}
+          >
+            {previewing ? "Playing selected voice…" : "Preview voice"}
+          </button>
+        </>
+      ) : null}
+      {show("success") ? (
+        <label>
+          Success criteria
+          <textarea value={agent.successCriteria || ""} onChange={(e) => onChange({ ...agent, successCriteria: e.target.value })} />
+        </label>
+      ) : null}
+      {show("knowledge") ? (
+        <label>
+          Knowledge bases
+          <div className="kb-list">
+            {bases.length === 0 ? <span className="muted">Create a knowledge base first.</span> : null}
+            {bases.map((kb) => {
+              const checked = (agent.knowledgeBaseIds || []).includes(kb.id);
+              return (
+                <label key={kb.id}>
+                  <input
+                    type="checkbox"
+                    checked={checked}
+                    onChange={() => {
+                      const current = agent.knowledgeBaseIds || [];
+                      const knowledgeBaseIds = checked
+                        ? current.filter((id) => id !== kb.id)
+                        : [...current, kb.id];
+                      onChange({ ...agent, knowledgeBaseIds });
+                    }}
+                  />
+                  {kb.name}
+                </label>
+              );
+            })}
+          </div>
+          <span className="muted">Attach documents the agent can answer from on live calls.</span>
+        </label>
+      ) : null}
+      {embedded ? null : (
+        <div className="row">
+          <button className="btn" type="submit" disabled={busy}>{busy ? "Saving…" : submitLabel}</button>
+          {actions}
         </div>
-        <span className="muted">Attach documents the agent can answer from on live calls.</span>
-      </label>
-      <div className="row">
-        <button className="btn" type="submit" disabled={busy}>{busy ? "Saving…" : submitLabel}</button>
-        {actions}
-      </div>
+      )}
+    </>
+  );
+
+  if (embedded) return <div className="grid studio-settings">{fields}</div>;
+  return (
+    <form className="card grid" onSubmit={handleSubmit}>
+      {fields}
     </form>
   );
 }

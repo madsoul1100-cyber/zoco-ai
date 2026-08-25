@@ -3,6 +3,7 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { cacheDel, cacheGet, cacheSet } from "./infra/cache.js";
 import { col, fromDoc, mongoState, toDoc } from "./infra/mongo.js";
+import { retrieveFromKnowledge } from "./engine/knowledge.js";
 import { defaultTelephony } from "./phone.js";
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../..");
@@ -244,12 +245,18 @@ export async function deleteKnowledgeBase(id) {
   await col("knowledgeBases").deleteOne({ _id: id });
 }
 
-export async function knowledgeContextForAgent(agent) {
+export async function knowledgeContextForAgent(agent, question = "") {
   const ids = agent?.knowledgeBaseIds || [];
   if (!ids.length) return "";
-  const bases = await Promise.all(ids.map((id) => getKnowledgeBase(id)));
+  const bases = (await Promise.all(ids.map((id) => getKnowledgeBase(id)))).filter(Boolean);
+  if (!bases.length) return "";
+  const retrieved = question
+    ? bases.flatMap((kb) =>
+        retrieveFromKnowledge(kb, question, 4).map((hit) => `${kb.name} / ${hit.name}:\n${hit.excerpt}`)
+      )
+    : [];
+  if (retrieved.length) return retrieved.join("\n\n").slice(0, 4000);
   return bases
-    .filter(Boolean)
     .map((kb) => {
       const body = (kb.documents || [])
         .map((doc) => `${doc.name || "note"}:\n${doc.text || ""}`)

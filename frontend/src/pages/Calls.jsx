@@ -31,7 +31,7 @@ export default function Calls() {
           </button>
         ))}
       </div>
-      <section className="card">
+      <section className="product-sheet">
         <table>
           <thead>
             <tr>

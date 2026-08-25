@@ -1,7 +1,7 @@
 import { useEffect, useState } from "react";
 import { useNavigate } from "react-router-dom";
 import { api } from "../api.js";
-import { PageHeader } from "../components/ui.jsx";
+import { AvatarMark, PageHeader, relativeTime } from "../components/ui.jsx";
 import { SERVICE_TEMPLATES, TEMPLATE_CATEGORIES } from "../lib/templates.js";
 import { languageLabel } from "../lib/languages.js";
 
@@ -11,6 +11,8 @@ export default function Agents() {
   const [category, setCategory] = useState("all");
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
+  const [query, setQuery] = useState("");
+  const [showAllTemplates, setShowAllTemplates] = useState(false);
   const navigate = useNavigate();
 
   useEffect(() => {
@@ -50,12 +52,15 @@ export default function Agents() {
   }
 
   const templates = SERVICE_TEMPLATES.filter((item) => category === "all" || item.category === category);
+  const visibleTemplates = showAllTemplates ? templates : templates.slice(0, 3);
+  const recents = agents
+    .filter((agent) => `${agent.name} ${agent.useCase || ""}`.toLowerCase().includes(query.toLowerCase()))
+    .sort((a, b) => String(b.updatedAt || "").localeCompare(String(a.updatedAt || "")));
 
   return (
     <>
       <PageHeader
         title="Agents"
-        subtitle="Describe a use case, start from a template, or open a studio and test in minutes."
         actions={
           <button className="btn" type="button" onClick={createBlank}>
             + Create from scratch
@@ -81,49 +86,76 @@ export default function Agents() {
       </section>
 
       {agents.length ? (
-        <section style={{ marginBottom: 28 }}>
-          <h3 className="section-title">Your agents</h3>
-          <div className="grid agent-grid">
-            {agents.map((agent) => (
-              <article key={agent.id} className="card agent-card" onClick={() => navigate(`/agents/${agent.id}`)}>
-                <div className="badge live">{agent.direction}</div>
-                <h3>{agent.name}</h3>
-                <p className="muted">{agent.useCase}</p>
-                <p className="muted">{languageLabel(agent.language || "en-IN")}</p>
-              </article>
-            ))}
+        <section className="product-sheet">
+          <div className="sheet-toolbar">
+            <h3>Recents</h3>
+            <input
+              className="input search-input"
+              value={query}
+              onChange={(e) => setQuery(e.target.value)}
+              placeholder="Search"
+            />
           </div>
+          <table className="recents-table">
+            <thead>
+              <tr>
+                <th>Agent</th>
+                <th>Last edited</th>
+              </tr>
+            </thead>
+            <tbody>
+              {recents.map((agent) => (
+                <tr key={agent.id} className="clickable" onClick={() => navigate(`/agents/${agent.id}`)}>
+                  <td>
+                    <div className="entity-cell">
+                      <AvatarMark name={agent.name} />
+                      <div>
+                        <strong>{agent.name}</strong>
+                        <div className="muted">{languageLabel(agent.language || "en-IN")} · {agent.direction}</div>
+                      </div>
+                    </div>
+                  </td>
+                  <td className="muted">{relativeTime(agent.updatedAt)}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
         </section>
       ) : null}
 
-      <div className="tabs">
-        {TEMPLATE_CATEGORIES.map((item) => (
-          <button
-            key={item.id}
-            type="button"
-            className={category === item.id ? "btn" : "btn ghost"}
-            onClick={() => setCategory(item.id)}
-          >
-            {item.label}
+      <section className="templates-block">
+        <div className="sheet-toolbar">
+          <h3>Agent templates</h3>
+          <div className="tabs">
+            {TEMPLATE_CATEGORIES.map((item) => (
+              <button
+                key={item.id}
+                type="button"
+                className={category === item.id ? "chip on" : "chip"}
+                onClick={() => setCategory(item.id)}
+              >
+                {item.label}
+              </button>
+            ))}
+          </div>
+        </div>
+        <div className="grid agent-grid">
+          {visibleTemplates.map((template) => (
+            <article key={template.id} className="card agent-card template-card" onClick={() => createFromTemplate(template)}>
+              <div className="template-icon" aria-hidden="true">
+                <span />
+              </div>
+              <h3>{template.name}</h3>
+              <p className="muted">{template.useCase}</p>
+            </article>
+          ))}
+        </div>
+        {templates.length > 3 ? (
+          <button className="link-quiet view-more" type="button" onClick={() => setShowAllTemplates((value) => !value)}>
+            {showAllTemplates ? "View less" : "View more"}
           </button>
-        ))}
-      </div>
-
-      <div className="grid agent-grid">
-        {templates.map((template) => (
-          <article key={template.id} className="card agent-card template-card">
-            <div className="template-icon" aria-hidden="true">
-              <span />
-            </div>
-            <div className="badge live">{template.direction}</div>
-            <h3>{template.name}</h3>
-            <p className="muted">{template.useCase}</p>
-            <button className="btn ghost" type="button" onClick={() => createFromTemplate(template)}>
-              Use template
-            </button>
-          </article>
-        ))}
-      </div>
+        ) : null}
+      </section>
     </>
   );
 }

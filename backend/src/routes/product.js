@@ -1,6 +1,7 @@
 import { v4 as uuid } from "uuid";
-import { generateAgentFromPrompt } from "../engine/generate.js";
+import { generateAgentFromPrompt, reviseAgentFromPrompt } from "../engine/generate.js";
 import { dashboardStats } from "../engine/rules.js";
+import { buildAnalytics } from "../engine/analytics.js";
 import { normalizeLanguage } from "../languages.js";
 import { normalizePhone } from "../phone.js";
 import { queueOrDial } from "../services/calling.js";
@@ -15,7 +16,6 @@ import {
   listCalls,
   listCallsByCampaign,
   listCampaigns,
-  listContacts,
   listKnowledgeBases,
   saveAgent,
   saveCall,
@@ -24,11 +24,23 @@ import {
   saveKnowledgeBase,
 } from "../store.js";
 import { inboundLineStatus, publicTelephony, resolveTelephony, syncInboundWebhook } from "../telephony/twilio.js";
+import { documentBytes, fileKind, knowledgeStats, retrieveFromKnowledge } from "../engine/knowledge.js";
 
 function textFromUpload(file) {
   const name = file?.originalname || "document.txt";
   const raw = Buffer.isBuffer(file?.buffer) ? file.buffer.toString("utf8") : "";
   return { name, text: raw.replace(/\u0000/g, "").slice(0, 80_000) };
+}
+
+function publicKnowledge(kb) {
+  if (!kb) return kb;
+  const documents = (kb.documents || []).map((doc) => ({
+    ...doc,
+    kind: doc.kind || fileKind(doc.name),
+    bytes: documentBytes(doc),
+    status: doc.status || "ready",
+  }));
+  return { ...kb, documents, stats: knowledgeStats({ ...kb, documents }) };
 }
 
 export function mountProductRoutes(app, { upload } = {}) {
@@ -49,14 +61,28 @@ export function mountProductRoutes(app, { upload } = {}) {
     res.status(201).json(agent);
   });
 
+  app.post("/api/agents/:id/assist", async (req, res) => {
+    const existing = await getAgent(req.params.id);
+    if (!existing) return res.status(404).json({ error: "Agent not found" });
+    const prompt = String(req.body?.prompt || "").trim();
+    if (!prompt) return res.status(400).json({ error: "Say what you want to change" });
+    const draft = { ...existing, ...(req.body?.agent && typeof req.body.agent === "object" ? req.body.agent : {}) };
+    try {
+      const result = await reviseAgentFromPrompt(draft, prompt);
+      res.json(result);
+    } catch (error) {
+      res.status(400).json({ error: error.message || "Genie could not update this agent" });
+    }
+  });
+
   app.get("/api/knowledge", async (_req, res) => {
-    res.json(await listKnowledgeBases());
+    res.json((await listKnowledgeBases()).map(publicKnowledge));
   });
 
   app.get("/api/knowledge/:id", async (req, res) => {
     const kb = await getKnowledgeBase(req.params.id);
     if (!kb) return res.status(404).json({ error: "Knowledge base not found" });
-    res.json(kb);
+    res.json(publicKnowledge(kb));
   });
 
   app.post("/api/knowledge", async (req, res) => {
@@ -69,13 +95,18 @@ export function mountProductRoutes(app, { upload } = {}) {
       createdAt: now,
       updatedAt: now,
     });
-    res.status(201).json(kb);
+    res.status(201).json(publicKnowledge(kb));
   });
 
   app.put("/api/knowledge/:id", async (req, res) => {
     const existing = await getKnowledgeBase(req.params.id);
     if (!existing) return res.status(404).json({ error: "Knowledge base not found" });
-    res.json(await saveKnowledgeBase({ ...existing, ...req.body, id: existing.id }));
+    res.json(publicKnowledge(await saveKnowledgeBase({
+      ...existing,
+      ...req.body,
+      id: existing.id,
+      documents: Array.isArray(req.body?.documents) ? req.body.documents : existing.documents,
+    })));
   });
 
   app.delete("/api/knowledge/:id", async (req, res) => {
@@ -83,27 +114,59 @@ export function mountProductRoutes(app, { upload } = {}) {
     res.json({ ok: true });
   });
 
-  app.post("/api/knowledge/:id/documents", upload?.single?.("file") || ((req, _res, next) => next()), async (req, res) => {
+  app.post("/api/knowledge/:id/documents", upload?.array?.("file", 12) || ((req, _res, next) => next()), async (req, res) => {
     const kb = await getKnowledgeBase(req.params.id);
     if (!kb) return res.status(404).json({ error: "Knowledge base not found" });
-    const file = req.file;
+    const files = Array.isArray(req.files) ? req.files : req.file ? [req.file] : [];
     const pasted = String(req.body?.text || "").trim();
-    const name = String(req.body?.name || file?.originalname || "Note").trim();
-    let text = pasted;
-    if (file?.buffer) text = textFromUpload(file).text || pasted;
-    if (!text) return res.status(400).json({ error: "Paste text or upload a .txt / .md / .csv file" });
-    kb.documents = [
-      ...(kb.documents || []),
-      { id: `doc_${uuid().slice(0, 8)}`, name, text, createdAt: new Date().toISOString() },
-    ];
-    res.status(201).json(await saveKnowledgeBase(kb));
+    const added = [];
+    for (const file of files) {
+      const parsed = textFromUpload(file);
+      if (!parsed.text) continue;
+      added.push({
+        id: `doc_${uuid().slice(0, 8)}`,
+        name: parsed.name,
+        text: parsed.text,
+        kind: fileKind(parsed.name),
+        bytes: Buffer.byteLength(parsed.text, "utf8"),
+        status: "ready",
+        createdAt: new Date().toISOString(),
+      });
+    }
+    if (pasted) {
+      const name = String(req.body?.name || "Note").trim() || "Note";
+      added.push({
+        id: `doc_${uuid().slice(0, 8)}`,
+        name,
+        text: pasted.slice(0, 80_000),
+        kind: fileKind(name),
+        bytes: Buffer.byteLength(pasted, "utf8"),
+        status: "ready",
+        createdAt: new Date().toISOString(),
+      });
+    }
+    if (!added.length) return res.status(400).json({ error: "Paste text or upload a .txt / .md / .csv file" });
+    kb.documents = [...(kb.documents || []), ...added];
+    res.status(201).json(publicKnowledge(await saveKnowledgeBase(kb)));
+  });
+
+  app.post("/api/knowledge/:id/query", async (req, res) => {
+    const kb = await getKnowledgeBase(req.params.id);
+    if (!kb) return res.status(404).json({ error: "Knowledge base not found" });
+    const question = String(req.body?.question || "").trim();
+    if (question.length < 3) return res.status(400).json({ error: "Ask a question to test retrieval" });
+    res.json({
+      question,
+      matches: retrieveFromKnowledge(kb, question),
+      stats: knowledgeStats(kb),
+    });
   });
 
   app.delete("/api/knowledge/:id/documents/:docId", async (req, res) => {
     const kb = await getKnowledgeBase(req.params.id);
     if (!kb) return res.status(404).json({ error: "Knowledge base not found" });
     kb.documents = (kb.documents || []).filter((doc) => doc.id !== req.params.docId);
-    res.json(await saveKnowledgeBase(kb));
+    res.json(publicKnowledge(await saveKnowledgeBase(kb)));
   });
 
   app.get("/api/inbound", async (_req, res) => {
@@ -289,46 +352,23 @@ export function mountProductRoutes(app, { upload } = {}) {
     res.json(await saveCampaign(campaign));
   });
 
-  app.get("/api/analytics", async (_req, res) => {
-    const [calls, agents, campaigns, contacts] = await Promise.all([
+  app.get("/api/analytics", async (req, res) => {
+    const [calls, agents, campaigns] = await Promise.all([
       listCalls(),
       listAgents(),
       listCampaigns(),
-      listContacts(),
     ]);
-    const byAgent = agents.map((agent) => {
-      const subset = calls.filter((call) => call.agentId === agent.id);
-      return {
-        id: agent.id,
-        name: agent.name,
-        direction: agent.direction,
-        ...dashboardStats(subset),
-      };
-    });
-    const dispositions = {};
-    for (const call of calls) {
-      const key = call.disposition || call.status || "unknown";
-      dispositions[key] = (dispositions[key] || 0) + 1;
-    }
-    const days = {};
-    for (const call of calls) {
-      const day = String(call.startedAt || call.createdAt || "").slice(0, 10);
-      if (!day) continue;
-      days[day] = days[day] || { calls: 0, success: 0 };
-      days[day].calls += 1;
-      if (["success", "qualified", "booked"].includes(call.disposition)) days[day].success += 1;
-    }
-    res.json({
-      overview: dashboardStats(calls),
-      byAgent,
-      dispositions,
-      days: Object.entries(days)
-        .sort(([a], [b]) => a.localeCompare(b))
-        .slice(-14)
-        .map(([date, value]) => ({ date, ...value })),
-      campaigns: campaigns.length,
-      contacts: contacts.length,
-    });
+    const from = req.query.from ? Date.parse(`${req.query.from}T00:00:00+05:30`) : Date.now() - 6 * 86400000;
+    const to = req.query.to ? Date.parse(`${req.query.to}T23:59:59.999+05:30`) : Date.now();
+    res.json(buildAnalytics({
+      calls,
+      agents,
+      campaigns,
+      from: Number.isNaN(from) ? undefined : from,
+      to: Number.isNaN(to) ? undefined : to,
+      agentId: req.query.agentId || "",
+      campaignId: req.query.campaignId || "",
+    }));
   });
 
   app.get("/api/usage", async (_req, res) => {

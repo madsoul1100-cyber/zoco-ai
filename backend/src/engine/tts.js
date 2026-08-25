@@ -39,7 +39,26 @@ async function saveClip(id, buffer, ext = "mp3") {
   return { id, ext, contentType: ext === "wav" ? "audio/wav" : "audio/mpeg" };
 }
 
-async function synthesizeSarvam({ text, language, voice, model, apiKey }) {
+export function voiceDynamics(agent) {
+  const settings = agent?.callSettings || {};
+  const pace = Math.min(2, Math.max(0.5, Number(settings.speakingSpeed ?? 1) || 1));
+  const pitch = Math.min(0.75, Math.max(-0.75, Number(settings.pitch ?? 0) || 0));
+  return { pace, pitch };
+}
+
+function isSarvamV2(model) {
+  return String(model || "").includes("v2") && !String(model || "").includes("v3");
+}
+
+async function synthesizeSarvam({ text, language, voice, model, apiKey, pace = 1, pitch = 0 }) {
+  const payload = {
+    text,
+    target_language_code: sarvamTtsLanguage(language),
+    speaker: voice || "shubh",
+    model: model || "bulbul:v3",
+    pace: Math.min(2, Math.max(0.5, Number(pace) || 1)),
+  };
+  if (isSarvamV2(payload.model)) payload.pitch = pitch;
   const response = await fetch("https://api.sarvam.ai/text-to-speech", {
     method: "POST",
     headers: {
@@ -47,13 +66,7 @@ async function synthesizeSarvam({ text, language, voice, model, apiKey }) {
       Authorization: `Bearer ${apiKey}`,
       "Content-Type": "application/json",
     },
-    body: JSON.stringify({
-      text,
-      target_language_code: sarvamTtsLanguage(language),
-      speaker: voice || "shubh",
-      model: model || "bulbul:v3",
-      pace: 1.0,
-    }),
+    body: JSON.stringify(payload),
   });
   const data = await response.json().catch(() => ({}));
   if (!response.ok) {
@@ -66,7 +79,7 @@ async function synthesizeSarvam({ text, language, voice, model, apiKey }) {
   return { buffer, ext };
 }
 
-async function synthesizeOpenAi({ text, voice, model, apiKey }) {
+async function synthesizeOpenAi({ text, voice, model, apiKey, speed = 1 }) {
   const response = await fetch("https://api.openai.com/v1/audio/speech", {
     method: "POST",
     headers: llmHeaders({ provider: "openai", apiKey }),
@@ -75,6 +88,7 @@ async function synthesizeOpenAi({ text, voice, model, apiKey }) {
       voice: voice || "nova",
       input: text,
       response_format: "mp3",
+      speed: Math.min(4, Math.max(0.25, Number(speed) || 1)),
     }),
   });
   if (!response.ok) {
@@ -94,12 +108,13 @@ export async function synthesizeSpeech({ agent, text, settings, publicBaseUrl = 
     }
     return { provider: "browser" };
   }
+  const { pace, pitch } = voiceDynamics(agent);
   const id = clipId({
     provider: tts.provider,
     model: tts.model,
     voice: tts.voice,
     language: tts.language,
-    text: spoken,
+    text: `${spoken}|p${pace}|t${pitch}`,
   });
   const existing = await getTtsClip(id);
   if (!existing) {
@@ -111,12 +126,15 @@ export async function synthesizeSpeech({ agent, text, settings, publicBaseUrl = 
             voice: tts.voice,
             model: tts.model,
             apiKey: tts.apiKey,
+            pace,
+            pitch,
           })
         : await synthesizeOpenAi({
             text: spoken,
             voice: tts.voice,
             model: tts.model,
             apiKey: tts.apiKey,
+            speed: pace,
           });
     await saveClip(id, made.buffer, made.ext);
   }

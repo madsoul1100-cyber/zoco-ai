@@ -1,8 +1,7 @@
 import { useEffect, useState } from "react";
 import { Link, useNavigate } from "react-router-dom";
 import { api } from "../api.js";
-import { AgentEditor } from "../components/AgentEditor.jsx";
-import { MessageTimeline, PageHeader, StatusBadge, when } from "../components/ui.jsx";
+import { EmptyState, MessageTimeline, PageHeader, StatusBadge, when } from "../components/ui.jsx";
 
 export default function Inbound() {
   const navigate = useNavigate();
@@ -86,32 +85,27 @@ export default function Inbound() {
       greeting: "Thank you for calling. How can I help you today?",
       successCriteria: "Resolve the request or capture a callback number.",
     });
-    setAgents((current) => [created, ...current.filter((item) => item.id !== created.id)]);
-    setAgent(created);
-    setInbound((current) => ({ ...current, agentId: created.id, enabled: true }));
-    setNotice("New inbound agent created. Edit it below, then save.");
+    const saved = await api.saveInbound({ agentId: created.id, enabled: true });
+    setInbound(saved);
+    navigate(`/agents/${created.id}`);
   }
 
-  async function saveAll(payload) {
+  async function saveLine(patch = {}) {
     setError("");
     setSaving(true);
     try {
-      const savedAgent = await api.updateAgent(payload.id, payload);
-      setAgent(savedAgent);
-      setAgents((current) => current.map((item) => (item.id === savedAgent.id ? savedAgent : item)));
+      const next = { ...inbound, ...patch };
       const saved = await api.saveInbound({
-        ...inbound,
-        enabled: inbound.enabled,
-        agentId: savedAgent.id,
-        greeting: "",
+        enabled: next.enabled,
+        agentId: next.agentId,
       });
       setInbound(saved);
       setNotice(
         saved.live
-          ? `Live. Dial ${saved.phoneNumber || saved.telephony?.fromNumber} — ${savedAgent.name} will answer.`
+          ? `Live. Dial ${saved.phoneNumber || saved.telephony?.fromNumber} — ${agent?.name || "the agent"} will answer.`
           : saved.enabled
-            ? "Agent saved, but the live line is not fully wired yet."
-            : "Agent saved. Turn on answering to take live calls."
+            ? "Saved. Finish the phone number checks to go live."
+            : "Answering is off."
       );
     } catch (err) {
       setError(err.message);
@@ -131,19 +125,19 @@ export default function Inbound() {
       direction: "inbound",
       customer: { name: "Test caller", phone: inbound.telephony?.workspacePhone || "+910000000000" },
     });
-    navigate(`/agents/${agent.id}?call=${call.id}`);
+    navigate(`/agents/${agent.id}?call=${call.id}&tab=tests`);
   }
 
   if (!inbound) return <p className="muted">Loading inbound…</p>;
 
   const line = inbound.line || {};
   const checks = [
-    { ok: Boolean(inbound.telephony?.twilioReady), label: "Twilio is connected" },
-    { ok: Boolean(inbound.telephony?.publicBaseUrl), label: "Public URL (ngrok) is set" },
-    { ok: Boolean(line.publicReachable), label: "Twilio can reach this API over the public URL" },
-    { ok: Boolean(line.wired), label: "This number’s voice webhook points at Zoco" },
+    { ok: Boolean(inbound.telephony?.twilioReady), label: "Twilio is connected", to: "/phone-numbers" },
+    { ok: Boolean(inbound.telephony?.publicBaseUrl), label: "Public URL is set", to: "/phone-numbers" },
+    { ok: Boolean(line.publicReachable), label: "Twilio can reach this API" },
+    { ok: Boolean(line.wired), label: "Voice webhook points at Zoco" },
     { ok: Boolean(inbound.agentId && agent), label: "An agent is assigned" },
-    { ok: Boolean(inbound.enabled), label: "Answer live inbound calls is on" },
+    { ok: Boolean(inbound.enabled), label: "Answering is on" },
   ];
   const number = inbound.phoneNumber || inbound.telephony?.fromNumber || "";
 
@@ -151,11 +145,11 @@ export default function Inbound() {
     <>
       <PageHeader
         title="Inbound calls"
-        subtitle="Pick the agent that answers this number, then edit it the same way as in studio. Greeting, voice, language, and brain all apply to live inbound calls."
+        subtitle="Assign an agent to your number. Edit greeting, voice, and instructions in studio — this page is the live line."
         actions={
           <>
             <span className={`badge ${inbound.live ? "done" : "recall"}`}>
-              {inbound.live ? "Live — answering" : "Inbound answering is off"}
+              {inbound.live ? "Live — answering" : "Not answering"}
             </span>
             <Link className="btn ghost" to="/phone-numbers">Phone numbers</Link>
           </>
@@ -164,91 +158,37 @@ export default function Inbound() {
       {error ? <p className="error">{error}</p> : null}
       {notice ? <p className={inbound.live ? "success" : "muted"}>{notice}</p> : null}
 
-      <section className="card" style={{ marginBottom: 16 }}>
-        <h3>{inbound.live ? "Ready for a live inbound call" : "Not answering yet"}</h3>
-        <p className="muted">
-          {inbound.live
-            ? `Dial ${number} from another phone. ${agent?.name || "The assigned agent"} will greet and talk.`
-            : "Edit the agent, turn answering on, and save. That also points the Twilio number at this webhook."}
-        </p>
-        <ul className="checks">
-          {checks.map((item) => (
-            <li key={item.label} className={item.ok ? "ok" : "no"}>
-              <span>{item.ok ? "●" : "○"}</span>
-              {item.label}
-            </li>
-          ))}
-        </ul>
-        {line.error ? <p className="error">{line.error}</p> : null}
-        <p className="muted" style={{ marginTop: 12 }}>
-          Number: {number || "Connect a provider number first"}.
-          Webhook: <code>{line.expectedUrl || `${inbound.telephony?.publicBaseUrl || "https://your-public-url"}/webhooks/twilio/inbound`}</code>
-        </p>
-      </section>
+      <div className="grid split">
+        <section className="product-sheet inbound-hero">
+          <div className="sheet-toolbar">
+            <div>
+              <p className="eyebrow">{inbound.live ? "Ready for a live call" : "Connect the line"}</p>
+              <h3>{number || "No number yet"}</h3>
+              <p className="muted">
+                {inbound.live
+                  ? `Dial this number. ${agent?.name || "The assigned agent"} will greet and talk.`
+                  : "Pick an agent, turn answering on, and save. The Twilio webhook is pointed here automatically."}
+              </p>
+            </div>
+            <label className="toggle-inline">
+              <input
+                type="checkbox"
+                checked={Boolean(inbound.enabled)}
+                onChange={(e) => setInbound({ ...inbound, enabled: e.target.checked })}
+              />
+              Answer live calls
+            </label>
+          </div>
 
-      <div className="grid split studio">
-        {agent ? (
-          <AgentEditor
-            agent={agent}
-            onChange={setAgent}
-            onSubmit={saveAll}
-            onError={setError}
-            busy={saving}
-            submitLabel="Save inbound agent"
-            extra={
-              <>
-                <label className="row" style={{ justifyContent: "space-between" }}>
-                  <span>Answer live inbound calls</span>
-                  <input
-                    type="checkbox"
-                    checked={Boolean(inbound.enabled)}
-                    onChange={(e) => setInbound({ ...inbound, enabled: e.target.checked })}
-                  />
-                </label>
-                <label>
-                  Agent on this number
-                  <div className="row">
-                    <select
-                      className="input"
-                      style={{ flex: 1 }}
-                      value={inbound.agentId || ""}
-                      onChange={(e) => selectAgent(e.target.value).catch((err) => setError(err.message))}
-                    >
-                      <option value="">Select an agent</option>
-                      {agents.map((item) => (
-                        <option key={item.id} value={item.id}>
-                          {item.name} · {item.direction}
-                        </option>
-                      ))}
-                    </select>
-                    <button className="btn ghost" type="button" onClick={createInboundAgent}>New inbound agent</button>
-                  </div>
-                </label>
-              </>
-            }
-            actions={
-              <>
-                {!inbound.enabled ? (
-                  <button
-                    className="btn ghost"
-                    type="button"
-                    disabled={saving}
-                    onClick={() => setInbound({ ...inbound, enabled: true })}
-                  >
-                    Turn answering on
-                  </button>
-                ) : null}
-                <button className="btn ghost" type="button" onClick={testBrowser}>Test in browser</button>
-              </>
-            }
-          />
-        ) : (
-          <section className="card grid">
-            <h3>Agent on this number</h3>
-            <p className="muted">Select an existing agent or create an inbound agent, then edit greeting, voice, language, and brain here — same as studio.</p>
-            <label>
-              Agent
-              <select className="input" value={inbound.agentId || ""} onChange={(e) => selectAgent(e.target.value)}>
+          <label>
+            Agent on this number
+            <div className="row">
+              <select
+                className="input"
+                style={{ flex: 1 }}
+                value={inbound.agentId || ""}
+                onChange={(e) => selectAgent(e.target.value).catch((err) => setError(err.message))}
+              >
                 <option value="">Select an agent</option>
                 {agents.map((item) => (
                   <option key={item.id} value={item.id}>
@@ -256,46 +196,74 @@ export default function Inbound() {
                   </option>
                 ))}
               </select>
-            </label>
-            <div className="row">
-              <button className="btn" type="button" onClick={createInboundAgent}>New inbound agent</button>
+              <button className="btn ghost" type="button" onClick={createInboundAgent}>New inbound agent</button>
             </div>
-          </section>
-        )}
+          </label>
+
+          <div className="row" style={{ marginTop: 8 }}>
+            <button className="btn" type="button" disabled={saving || !inbound.agentId} onClick={() => saveLine()}>
+              {saving ? "Saving…" : inbound.live ? "Save line" : "Go live"}
+            </button>
+            {agent ? (
+              <button className="btn ghost" type="button" onClick={() => navigate(`/agents/${agent.id}`)}>
+                Edit in studio
+              </button>
+            ) : null}
+            <button className="btn ghost" type="button" onClick={testBrowser}>Test in browser</button>
+          </div>
+
+          <ul className="checks compact">
+            {checks.map((item) => (
+              <li key={item.label} className={item.ok ? "ok" : "no"}>
+                <span>{item.ok ? "●" : "○"}</span>
+                {item.to && !item.ok ? <Link to={item.to}>{item.label}</Link> : item.label}
+              </li>
+            ))}
+          </ul>
+        </section>
 
         <div className="grid" style={{ alignContent: "start", gap: 16 }}>
           {liveCall && ["queued", "ringing", "in_progress"].includes(liveCall.status) ? (
-            <section className="card">
-              <div className="row" style={{ justifyContent: "space-between" }}>
+            <section className="product-sheet">
+              <div className="sheet-toolbar">
                 <h3>Live inbound · {liveCall.customer?.phone}</h3>
                 <StatusBadge status={liveCall.status} disposition={liveCall.disposition} />
               </div>
               <MessageTimeline messages={liveCall.messages || []} />
             </section>
           ) : (
-            <section className="card">
-              <h3>Live inbound</h3>
-              <p className="muted">
-                After you save, dial {number || "the Twilio number"}. The transcript appears here the same way outbound studio shows a live call.
-              </p>
-            </section>
+            <EmptyState
+              title="Waiting for a call"
+              body={`After you go live, dial ${number || "the Twilio number"}. The transcript appears here.`}
+            />
           )}
 
-          <section className="card">
-            <h3>Recent inbound calls</h3>
+          <section className="product-sheet">
+            <div className="sheet-toolbar">
+              <h3>Recent inbound</h3>
+              <Link className="link-quiet" to="/calls">View all</Link>
+            </div>
             {calls.length === 0 ? (
-              <p className="muted">No inbound calls yet.</p>
+              <p className="muted sheet-empty">No inbound calls yet.</p>
             ) : (
-              <ul className="plain-list">
-                {calls.map((call) => (
-                  <li key={call.id} className="row" style={{ justifyContent: "space-between" }}>
-                    <span>
-                      {call.customer?.phone || "Unknown"} · {when(call.startedAt || call.createdAt)}
-                    </span>
-                    <StatusBadge status={call.status} disposition={call.disposition} />
-                  </li>
-                ))}
-              </ul>
+              <table className="recents-table">
+                <thead>
+                  <tr>
+                    <th>Caller</th>
+                    <th>Status</th>
+                    <th>When</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {calls.map((call) => (
+                    <tr key={call.id} className="clickable" onClick={() => navigate(`/calls/${call.id}`)}>
+                      <td>{call.customer?.phone || "Unknown"}</td>
+                      <td><StatusBadge status={call.status} disposition={call.disposition} /></td>
+                      <td className="muted">{when(call.startedAt || call.createdAt)}</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
             )}
           </section>
         </div>

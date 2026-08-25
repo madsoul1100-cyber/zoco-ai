@@ -1,7 +1,14 @@
 import { useEffect, useState } from "react";
 import { Link, useNavigate } from "react-router-dom";
 import { api } from "../api.js";
-import { PageHeader, StatusBadge, when } from "../components/ui.jsx";
+import { AvatarMark, PageHeader, StatusBadge, relativeTime, when } from "../components/ui.jsx";
+
+function greeting() {
+  const hour = new Date().getHours();
+  if (hour < 12) return "Good morning";
+  if (hour < 17) return "Good afternoon";
+  return "Good evening";
+}
 
 export default function Dashboard() {
   const [data, setData] = useState(null);
@@ -16,12 +23,13 @@ export default function Dashboard() {
   if (!data) return <p className="muted">Loading Zoco…</p>;
 
   const { stats, recentCalls, recallQueue, agents } = data;
+  const name = data.workspaceName || data.telephony?.workspaceName || "";
 
   return (
     <>
       <PageHeader
-        title="Build. Test. Go live."
-        subtitle="Describe an agent, test it in the studio, put a number on it, then watch every call land as transcript plus outcome."
+        title={`${greeting()}${name ? `, ${name}` : ""}`}
+        subtitle="Build an agent, attach knowledge, put a number on it, then watch every call land as transcript plus outcome."
         actions={
           <>
             <button className="btn ghost" onClick={() => navigate("/agents")}>Create agent</button>
@@ -31,69 +39,94 @@ export default function Dashboard() {
       />
 
       <div className="grid stats">
-        <Stat label="Calls today" value={stats.todayCalls} />
         <Stat label="Live now" value={stats.liveCalls} />
+        <Stat label="Calls today" value={stats.todayCalls} />
         <Stat label="Successful" value={stats.successfulCalls} />
         <Stat label="Recall due" value={stats.recallDue} />
-        <Stat label="Scheduled" value={stats.scheduledCalls || 0} />
       </div>
 
-      <div className="grid split" style={{ marginTop: 16 }}>
-        <section className="card">
-          <div className="row" style={{ justifyContent: "space-between" }}>
+      <div className="grid split" style={{ marginTop: 20 }}>
+        <section className="product-sheet">
+          <div className="sheet-toolbar">
+            <h3>Recents</h3>
+            <Link to="/agents" className="link-quiet">All agents</Link>
+          </div>
+          {agents.length === 0 ? (
+            <p className="muted sheet-empty">No agents yet. Create one from the Agents page.</p>
+          ) : (
+            <table className="recents-table">
+              <thead>
+                <tr>
+                  <th>Agent</th>
+                  <th>Last edited</th>
+                </tr>
+              </thead>
+              <tbody>
+                {agents.slice(0, 6).map((agent) => (
+                  <tr key={agent.id} className="clickable" onClick={() => navigate(`/agents/${agent.id}`)}>
+                    <td>
+                      <div className="entity-cell">
+                        <AvatarMark name={agent.name} />
+                        <div>
+                          <strong>{agent.name}</strong>
+                          <div className="muted">{agent.direction}</div>
+                        </div>
+                      </div>
+                    </td>
+                    <td className="muted">{relativeTime(agent.updatedAt)}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          )}
+        </section>
+
+        <section className="product-sheet">
+          <div className="sheet-toolbar">
             <h3>Recent calls</h3>
             <Link to="/calls" className="link-quiet">View all</Link>
           </div>
-          <table>
-            <thead>
-              <tr>
-                <th>Customer</th>
-                <th>Agent</th>
-                <th>Status</th>
-                <th>When</th>
-              </tr>
-            </thead>
-            <tbody>
-              {recentCalls.map((call) => (
-                <tr key={call.id} className="clickable" onClick={() => navigate(`/calls/${call.id}`)}>
-                  <td>
-                    <strong>{call.customer?.name}</strong>
-                    <div className="muted">{call.customer?.phone || call.channel}</div>
-                  </td>
-                  <td>{call.agentName}</td>
-                  <td><StatusBadge status={call.status} disposition={call.disposition} /></td>
-                  <td className="muted">{when(call.startedAt)}</td>
+          {recentCalls.length === 0 ? (
+            <p className="muted sheet-empty">No calls yet.</p>
+          ) : (
+            <table className="recents-table">
+              <thead>
+                <tr>
+                  <th>Customer</th>
+                  <th>Status</th>
                 </tr>
-              ))}
-            </tbody>
-          </table>
-        </section>
-
-        <section className="card">
-          <div className="row" style={{ justifyContent: "space-between" }}>
-            <h3>Recall queue</h3>
-            <Link to="/boards" className="link-quiet">Open boards</Link>
-          </div>
-          {recallQueue.length === 0 ? <p className="muted">Nothing waiting.</p> : null}
-          <div className="grid">
-            {recallQueue.slice(0, 5).map((call) => (
-              <div key={call.id} className="row" style={{ justifyContent: "space-between" }}>
-                <div>
-                  <strong>{call.customer?.name}</strong>
-                  <div className="muted">{call.recall?.reason?.replaceAll("_", " ")} · {when(call.recall?.scheduledAt)}</div>
-                </div>
-                <StatusBadge disposition={call.disposition} />
+              </thead>
+              <tbody>
+                {recentCalls.slice(0, 6).map((call) => (
+                  <tr key={call.id} className="clickable" onClick={() => navigate(`/calls/${call.id}`)}>
+                    <td>
+                      <strong>{call.customer?.name}</strong>
+                      <div className="muted">{call.agentName}</div>
+                    </td>
+                    <td><StatusBadge status={call.status} disposition={call.disposition} /></td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          )}
+          {recallQueue.length ? (
+            <>
+              <hr className="sheet-rule" />
+              <div className="sheet-toolbar">
+                <h3>Recall due</h3>
+                <Link to="/boards" className="link-quiet">Open boards</Link>
               </div>
-            ))}
-          </div>
-          <hr style={{ borderColor: "var(--line)", margin: "20px 0" }} />
-          <h3>Agents</h3>
-          {agents.map((agent) => (
-            <p key={agent.id}>
-              <Link to={`/agents/${agent.id}`}>{agent.name}</Link>
-              <span className="muted"> · {agent.direction}</span>
-            </p>
-          ))}
+              {recallQueue.slice(0, 4).map((call) => (
+                <div key={call.id} className="row" style={{ justifyContent: "space-between", padding: "8px 0" }}>
+                  <div>
+                    <strong>{call.customer?.name}</strong>
+                    <div className="muted">{when(call.recall?.scheduledAt)}</div>
+                  </div>
+                  <StatusBadge disposition={call.disposition} />
+                </div>
+              ))}
+            </>
+          ) : null}
         </section>
       </div>
     </>

@@ -69,17 +69,19 @@ export const api = {
   rules: () => request("/api/rules"),
   saveRules: (payload) => request("/api/rules", { method: "PUT", body: JSON.stringify(payload) }),
   generateAgent: (prompt) => request("/api/agents/generate", { method: "POST", body: JSON.stringify({ prompt }) }),
+  assistAgent: (id, payload) => request(`/api/agents/${id}/assist`, { method: "POST", body: JSON.stringify(payload) }),
   deleteAgent: (id) => request(`/api/agents/${id}`, { method: "DELETE" }),
   knowledge: () => request("/api/knowledge"),
   knowledgeBase: (id) => request(`/api/knowledge/${id}`),
   createKnowledge: (payload) => request("/api/knowledge", { method: "POST", body: JSON.stringify(payload) }),
   updateKnowledge: (id, payload) => request(`/api/knowledge/${id}`, { method: "PUT", body: JSON.stringify(payload) }),
   deleteKnowledge: (id) => request(`/api/knowledge/${id}`, { method: "DELETE" }),
-  addDocument: async (id, { name, text, file } = {}) => {
+  addDocument: async (id, { name, text, file, files } = {}) => {
     const data = new FormData();
     if (name) data.append("name", name);
     if (text) data.append("text", text);
-    if (file) data.append("file", file);
+    const uploads = files?.length ? [...files] : file ? [file] : [];
+    uploads.forEach((item) => data.append("file", item));
     const response = await fetch(`/api/knowledge/${id}/documents`, { method: "POST", body: data });
     if (!response.ok) {
       const body = await response.json().catch(() => ({}));
@@ -88,6 +90,7 @@ export const api = {
     return response.json();
   },
   deleteDocument: (id, docId) => request(`/api/knowledge/${id}/documents/${docId}`, { method: "DELETE" }),
+  queryKnowledge: (id, question) => request(`/api/knowledge/${id}/query`, { method: "POST", body: JSON.stringify({ question }) }),
   inbound: () => request("/api/inbound"),
   saveInbound: (payload) => request("/api/inbound", { method: "PUT", body: JSON.stringify(payload) }),
   campaigns: () => request("/api/campaigns"),
@@ -96,7 +99,7 @@ export const api = {
   updateCampaign: (id, payload) => request(`/api/campaigns/${id}`, { method: "PUT", body: JSON.stringify(payload) }),
   launchCampaign: (id) => request(`/api/campaigns/${id}/launch`, { method: "POST", body: "{}" }),
   pauseCampaign: (id) => request(`/api/campaigns/${id}/pause`, { method: "POST", body: "{}" }),
-  analytics: () => request("/api/analytics"),
+  analytics: (query = "") => request(`/api/analytics${query}`),
   usage: () => request("/api/usage"),
   providers: () => request("/api/providers"),
   aiSettings: () => request("/api/ai"),

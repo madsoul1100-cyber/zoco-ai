@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import { useNavigate, useParams } from "react-router-dom";
+import { Link, useNavigate, useParams } from "react-router-dom";
 import { api } from "../api.js";
 import { PageHeader, StatusBadge, when } from "../components/ui.jsx";
 
@@ -31,8 +31,23 @@ export default function CampaignDetail() {
     }
   }
 
+  async function pause() {
+    setBusy(true);
+    setError("");
+    try {
+      await api.pauseCampaign(id);
+      await refresh();
+    } catch (err) {
+      setError(err.message);
+    } finally {
+      setBusy(false);
+    }
+  }
+
   if (error && !campaign) return <p className="error">{error}</p>;
   if (!campaign) return <p className="muted">Loading campaign…</p>;
+
+  const running = ["running", "launching", "in_progress"].includes(campaign.status);
 
   return (
     <>
@@ -42,9 +57,16 @@ export default function CampaignDetail() {
         actions={
           <>
             <StatusBadge status={campaign.status} />
-            <button className="btn" type="button" onClick={launch} disabled={busy}>
-              {busy ? "Launching…" : "Launch campaign"}
-            </button>
+            <Link className="btn ghost" to={`/agents/${campaign.agentId}`}>Edit agent</Link>
+            {running ? (
+              <button className="btn ghost" type="button" onClick={pause} disabled={busy}>
+                {busy ? "Pausing…" : "Pause"}
+              </button>
+            ) : (
+              <button className="btn" type="button" onClick={launch} disabled={busy}>
+                {busy ? "Launching…" : "Launch campaign"}
+              </button>
+            )}
           </>
         }
       />
@@ -57,9 +79,9 @@ export default function CampaignDetail() {
       </div>
 
       <div className="grid split">
-        <section className="card">
+        <section className="product-sheet">
           <h3>List</h3>
-          <table>
+          <table className="recents-table">
             <thead>
               <tr><th>Name</th><th>Phone</th><th>Notes</th></tr>
             </thead>
@@ -74,10 +96,10 @@ export default function CampaignDetail() {
             </tbody>
           </table>
         </section>
-        <section className="card">
+        <section className="product-sheet">
           <h3>Call results</h3>
-          {(campaign.calls || []).length === 0 ? <p className="muted">Launch to start dialing.</p> : null}
-          <table>
+          {(campaign.calls || []).length === 0 ? <p className="muted sheet-empty">Launch to start dialing.</p> : null}
+          <table className="recents-table">
             <thead>
               <tr><th>Customer</th><th>Outcome</th><th>When</th></tr>
             </thead>

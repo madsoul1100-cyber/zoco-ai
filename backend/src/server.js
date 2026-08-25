@@ -3,6 +3,7 @@ import express from "express";
 import multer from "multer";
 import { v4 as uuid } from "uuid";
 import { generateReply, streamModelTokens, parseSpoken, extractSlots, guardEarlyHangup, resolveLlm, followCustomerLanguage } from "./engine/conversation.js";
+import { renderGreeting } from "./engine/template.js";
 import { applyOutcome, dashboardStats, DISPOSITIONS } from "./engine/rules.js";
 import { publicProviderCatalog, resolveLlmConfig } from "./engine/providers.js";
 import { getTtsClip, synthesizeSpeech } from "./engine/tts.js";
@@ -148,6 +149,10 @@ app.post("/api/tts", async (req, res) => {
     ttsModel: req.body?.ttsModel || stored?.ttsModel,
     language: req.body?.language || stored?.language,
     voice: req.body?.voice || stored?.voice,
+    callSettings: {
+      ...(stored?.callSettings && typeof stored.callSettings === "object" ? stored.callSettings : {}),
+      ...(req.body?.callSettings && typeof req.body.callSettings === "object" ? req.body.callSettings : {}),
+    },
   };
   try {
     const spoken = await synthesizeSpeech({
@@ -233,6 +238,16 @@ app.post("/api/agents", async (req, res) => {
     knowledgeBaseIds: Array.isArray(body.knowledgeBaseIds) ? body.knowledgeBaseIds : [],
     category: body.category || "",
     status: body.status || "draft",
+    version: Number(body.version || 1),
+    instructions: body.instructions || body.persona || "",
+    variables: Array.isArray(body.variables) ? body.variables : [],
+    inputVariables: Array.isArray(body.inputVariables) ? body.inputVariables : [],
+    outputVariables: Array.isArray(body.outputVariables) ? body.outputVariables : [],
+    customTools: Array.isArray(body.customTools) ? body.customTools : [],
+    callSettings: body.callSettings && typeof body.callSettings === "object" ? body.callSettings : {},
+    tests: Array.isArray(body.tests) ? body.tests : [],
+    instructionSections: Array.isArray(body.instructionSections) ? body.instructionSections : [],
+    workflow: body.workflow && typeof body.workflow === "object" ? body.workflow : { enabled: false, nodes: [] },
     createdAt: now,
     updatedAt: now,
   };
@@ -428,7 +443,7 @@ app.post("/api/calls", async (req, res) => {
     await attachTurn(call, {
       id: `msg_${uuid().slice(0, 8)}`,
       role: "assistant",
-      text: agent.greeting,
+      text: renderGreeting(agent, customer) || agent.greeting,
       timestamp: now,
       audioOffsetMs: 0,
     }, "chat");
@@ -491,7 +506,7 @@ app.post("/api/calls/:id/connect", async (req, res) => {
     await attachTurn(call, {
       id: `msg_${uuid().slice(0, 8)}`,
       role: "assistant",
-      text: agent?.greeting || "Hi, you are through to Zoco.",
+      text: renderGreeting(agent, call.customer) || agent?.greeting || "Hi, you are through to Zoco.",
       timestamp: now,
       audioOffsetMs: null,
     });
@@ -521,7 +536,7 @@ app.post("/api/calls/:id/messages", async (req, res) => {
     audioOffsetMs: req.body?.audioOffsetMs ?? null,
   }, source);
 
-  const reply = await generateReply({ agent, call, userText, knowledge: await knowledgeContextForAgent(agent) });
+  const reply = await generateReply({ agent, call, userText, knowledge: await knowledgeContextForAgent(agent, userText) });
   call.gathered = { ...(call.gathered || {}), ...(reply.slots || {}) };
   call.llm = { provider: reply.provider, model: reply.model || null };
   await attachTurn(call, {
@@ -598,7 +613,7 @@ app.post("/api/calls/:id/messages/stream", async (req, res) => {
         userText,
         slots,
         llm,
-        knowledge: await knowledgeContextForAgent(agent),
+        knowledge: await knowledgeContextForAgent(agent, userText),
       })) {
         full += token;
         emit({ type: "delta", text: token });
@@ -812,7 +827,10 @@ async function handleInboundCall(req, res) {
     createdAt: now,
     messages: [],
   };
-  const greeting = inbound.greeting || agent.greeting || "Thank you for calling. How can I help?";
+  const greeting =
+    inbound.greeting ||
+    renderGreeting(agent, { name: from || "Caller", phone: from }) ||
+    "Thank you for calling. How can I help?";
   await attachTurn(call, {
     id: `msg_${uuid().slice(0, 8)}`,
     role: "assistant",
@@ -843,6 +861,7 @@ app.post("/webhooks/twilio/voice", async (req, res) => {
   const tel = await resolveTelephony();
   const greeting =
     [...(call.messages || [])].reverse().find((m) => m.role === "assistant")?.text ||
+    renderGreeting(agent, call.customer) ||
     agent?.greeting ||
     "Hello, is now a good time?";
   if (!call.messages.some((m) => m.role === "assistant")) {
@@ -886,7 +905,7 @@ app.post("/webhooks/twilio/gather", async (req, res) => {
     timestamp: new Date().toISOString(),
     audioOffsetMs: null,
   }, "telephony");
-  const reply = await generateReply({ agent, call, userText: spoken, knowledge: await knowledgeContextForAgent(agent) });
+  const reply = await generateReply({ agent, call, userText: spoken, knowledge: await knowledgeContextForAgent(agent, spoken) });
   const language = resolveSpokenLanguage(call, agent);
   call.gathered = { ...(call.gathered || {}), ...(reply.slots || {}) };
   call.llm = { provider: reply.provider, model: reply.model || null };

@@ -1,7 +1,7 @@
 import { useEffect, useState } from "react";
 import { useNavigate } from "react-router-dom";
 import { api } from "../api.js";
-import { PageHeader, StatusBadge } from "../components/ui.jsx";
+import { AvatarMark, EmptyState, Modal, PageHeader, StatusBadge, relativeTime } from "../components/ui.jsx";
 
 function parseCsv(text) {
   return String(text || "")
@@ -22,12 +22,17 @@ export default function Campaigns() {
   const [campaigns, setCampaigns] = useState([]);
   const [form, setForm] = useState({ name: "", agentId: "", csv: "" });
   const [error, setError] = useState("");
+  const [open, setOpen] = useState(false);
+  const [query, setQuery] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [ready, setReady] = useState(false);
 
   async function refresh() {
     const [agentList, list] = await Promise.all([api.agents(), api.campaigns()]);
     setAgents(agentList);
     setCampaigns(list);
     setForm((current) => ({ ...current, agentId: current.agentId || agentList[0]?.id || "" }));
+    setReady(true);
   }
 
   useEffect(() => {
@@ -42,27 +47,120 @@ export default function Campaigns() {
       setError("Paste a list: name,phone,notes — one customer per line.");
       return;
     }
-    const campaign = await api.createCampaign({
-      name: form.name,
-      agentId: form.agentId,
-      contacts,
-    });
-    navigate(`/campaigns/${campaign.id}`);
+    setBusy(true);
+    try {
+      const campaign = await api.createCampaign({
+        name: form.name,
+        agentId: form.agentId,
+        contacts,
+      });
+      setOpen(false);
+      navigate(`/campaigns/${campaign.id}`);
+    } catch (err) {
+      setError(err.message);
+    } finally {
+      setBusy(false);
+    }
   }
+
+  const visible = campaigns.filter((campaign) =>
+    `${campaign.name} ${campaign.agentName || ""}`.toLowerCase().includes(query.toLowerCase())
+  );
 
   return (
     <>
       <PageHeader
         title="Outbound campaigns"
         subtitle="Upload a list, pick an agent, then launch. Missed calls go to the recall queue automatically."
+        actions={
+          <button className="btn" type="button" onClick={() => setOpen(true)} disabled={!agents.length}>
+            + Create campaign
+          </button>
+        }
       />
-      {error ? <p className="error">{error}</p> : null}
+      {error && !open ? <p className="error">{error}</p> : null}
 
-      <form className="card grid" onSubmit={create} style={{ marginBottom: 16 }}>
-        <div className="grid split">
+      {!ready ? (
+        <p className="muted">Loading campaigns…</p>
+      ) : campaigns.length === 0 ? (
+        <EmptyState
+          title="No campaigns yet"
+          body={agents.length
+            ? "Create a campaign, paste contacts, and launch. Each row becomes a live outbound call."
+            : "Create an outbound agent first, then come back to launch a list."}
+          action={
+            agents.length ? (
+              <button className="btn" type="button" onClick={() => setOpen(true)}>+ Create campaign</button>
+            ) : (
+              <button className="btn" type="button" onClick={() => navigate("/agents")}>Create an agent</button>
+            )
+          }
+        />
+      ) : (
+        <section className="product-sheet">
+          <div className="sheet-toolbar">
+            <h3>Campaigns</h3>
+            <input
+              className="input search-input"
+              value={query}
+              onChange={(e) => setQuery(e.target.value)}
+              placeholder="Search"
+            />
+          </div>
+          <table className="recents-table">
+            <thead>
+              <tr>
+                <th>Campaign</th>
+                <th>Agent</th>
+                <th>Contacts</th>
+                <th>Status</th>
+                <th>Updated</th>
+              </tr>
+            </thead>
+            <tbody>
+              {visible.map((campaign) => (
+                <tr key={campaign.id} className="clickable" onClick={() => navigate(`/campaigns/${campaign.id}`)}>
+                  <td>
+                    <div className="entity-cell">
+                      <AvatarMark name={campaign.name} />
+                      <strong>{campaign.name}</strong>
+                    </div>
+                  </td>
+                  <td>{campaign.agentName}</td>
+                  <td>{campaign.contacts?.length || 0}</td>
+                  <td><StatusBadge status={campaign.status} /></td>
+                  <td className="muted">{relativeTime(campaign.updatedAt || campaign.createdAt)}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </section>
+      )}
+
+      <Modal
+        open={open}
+        title="Create campaign"
+        onClose={() => setOpen(false)}
+        footer={
+          <>
+            <button className="btn ghost" type="button" onClick={() => setOpen(false)}>Cancel</button>
+            <button className="btn" type="submit" form="create-campaign" disabled={busy}>
+              {busy ? "Creating…" : "Create campaign"}
+            </button>
+          </>
+        }
+      >
+        {error ? <p className="error">{error}</p> : null}
+        <form id="create-campaign" className="grid" onSubmit={create}>
           <label>
             Campaign name
-            <input className="input" value={form.name} onChange={(e) => setForm({ ...form, name: e.target.value })} placeholder="August EMI reminders" required />
+            <input
+              className="input"
+              value={form.name}
+              onChange={(e) => setForm({ ...form, name: e.target.value })}
+              placeholder="August EMI reminders"
+              required
+            />
           </label>
           <label>
             Agent
@@ -72,42 +170,17 @@ export default function Campaigns() {
               ))}
             </select>
           </label>
-        </div>
-        <label>
-          Contact list (CSV)
-          <textarea
-            value={form.csv}
-            onChange={(e) => setForm({ ...form, csv: e.target.value })}
-            placeholder={"Riya Shah,+919876543210,EMI due 21 Aug\nArjun Mehta,8888111222,follow up"}
-            required
-          />
-        </label>
-        <button className="btn" type="submit">Create campaign</button>
-      </form>
-
-      <section className="card">
-        <table>
-          <thead>
-            <tr>
-              <th>Campaign</th>
-              <th>Agent</th>
-              <th>Contacts</th>
-              <th>Status</th>
-            </tr>
-          </thead>
-          <tbody>
-            {campaigns.map((campaign) => (
-              <tr key={campaign.id} className="clickable" onClick={() => navigate(`/campaigns/${campaign.id}`)}>
-                <td><strong>{campaign.name}</strong></td>
-                <td>{campaign.agentName}</td>
-                <td>{campaign.contacts?.length || 0}</td>
-                <td><StatusBadge status={campaign.status} /></td>
-              </tr>
-            ))}
-          </tbody>
-        </table>
-        {campaigns.length === 0 ? <p className="muted">No campaigns yet.</p> : null}
-      </section>
+          <label>
+            Contact list (CSV)
+            <textarea
+              value={form.csv}
+              onChange={(e) => setForm({ ...form, csv: e.target.value })}
+              placeholder={"Riya Shah,+919876543210,EMI due 21 Aug\nArjun Mehta,8888111222,follow up"}
+              required
+            />
+          </label>
+        </form>
+      </Modal>
     </>
   );
 }

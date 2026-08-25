@@ -6,6 +6,7 @@ export default defineConfig({
   server: {
     host: "0.0.0.0",
     port: 5173,
+    allowedHosts: ["voice.my-leader.in"],
     proxy: {
       "/api": "http://127.0.0.1:8787",
       "/webhooks": "http://127.0.0.1:8787",
@@ -14,6 +15,7 @@ export default defineConfig({
   preview: {
     host: "0.0.0.0",
     port: 5173,
+    allowedHosts: ["voice.my-leader.in"],
     proxy: {
       "/api": "http://127.0.0.1:8787",
       "/webhooks": "http://127.0.0.1:8787",

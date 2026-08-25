@@ -134,8 +134,12 @@ const LANGUAGES = [
 const DEFAULT_LANGUAGE = "en-IN";
 
 export function getLanguage(code = DEFAULT_LANGUAGE) {
-  const key = String(code || "").trim();
-  return LANGUAGES.find((lang) => lang.code.toLowerCase() === key.toLowerCase()) || LANGUAGES[0];
+  const key = String(code || "").trim().toLowerCase();
+  return (
+    LANGUAGES.find((lang) => lang.code.toLowerCase() === key) ||
+    LANGUAGES.find((lang) => lang.label.toLowerCase() === key || lang.native.toLowerCase() === key) ||
+    LANGUAGES[0]
+  );
 }
 
 export function normalizeLanguage(code) {
@@ -167,7 +171,7 @@ const HINGLISH =
   /\b(haan|hanji|nahi|nahin|mat|kya|hai|hain|aap|namaste|namaskar|theek|thik|achha|accha|bilkul|yaar|bhai|ji|kaise|hoon|rha|raha|karo|bolo|suno|samajh|matlab|kitna|kab|kahan)\b/i;
 
 const LANGUAGE_REQUESTS = [
-  { code: "en-IN", re: /\b(?:talk|speak|switch|reply|answer|please).{0,40}\benglish\b|\bin english\b|\benglish please\b|\benglish mein\b|\bangrezi\b|\bangreji\b|अंग्रेजी|इंग्लिश/i },
+  { code: "en-IN", re: /\b(?:talk|speak|switch|reply|answer|please|want|in).{0,48}\benglish\b|\bin english\b|\benglish please\b|\benglish (?:mein|me|में)\b|\bnot english\b|\bangrezi\b|\bangreji\b|अंग्रेजी|इंग्लिश|इंग्लिश में|अंग्रेज़ी/i },
   { code: "hi-IN", re: /\b(?:talk|speak|switch|reply|answer|please).{0,40}\bhindi\b|\bin hindi\b|\bhindi please\b|\bhindi mein\b|\bhindi me\b|हिंदी में|हिन्दी में|हिंदी बोल|हिन्दी बोल/i },
   { code: "ta-IN", re: /\b(?:talk|speak|switch).{0,40}\btamil\b|\bin tamil\b|தமிழில்/i },
   { code: "te-IN", re: /\b(?:talk|speak|switch).{0,40}\btelugu\b|\bin telugu\b|తెలుగులో/i },

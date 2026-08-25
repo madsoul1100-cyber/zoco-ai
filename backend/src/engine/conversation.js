@@ -3,7 +3,7 @@
  * Fast path: short spoken text + optional [END:disposition] tag. No JSON-mode round trip.
  */
 
-import { detectLanguageFromText, getLanguage } from "../languages.js";
+import { detectLanguageFromText, detectRequestedLanguage, getLanguage } from "../languages.js";
 import { getAiSettings } from "../store.js";
 import { llmHeaders, resolveLlmConfig, speakerGender } from "./providers.js";
 
@@ -24,25 +24,64 @@ export async function resolveLlm(agent) {
   return resolveLlmConfig(agent, settings);
 }
 
+function compiledAgentInstructions(agent) {
+  const sections = Array.isArray(agent?.instructionSections) ? agent.instructionSections : [];
+  if (sections.length) {
+    return sections
+      .filter((section) => String(section?.title || "").trim() || String(section?.body || "").trim())
+      .map((section) => {
+        const title = String(section.title || "").trim();
+        const body = String(section.body || "").trim();
+        if (title && body) return `${title}\n${body}`;
+        return title || body;
+      })
+      .join("\n\n")
+      .trim();
+  }
+  return String(agent?.instructions || "").trim();
+}
+
+function workflowInstruction(agent) {
+  const nodes = Array.isArray(agent?.workflow?.nodes) ? agent.workflow.nodes : [];
+  if (!agent?.workflow?.enabled || !nodes.length) return "";
+  return `Call flow — move through these stages in order. Do not say stage names out loud.\n${nodes
+    .map((node, index) => {
+      const title = String(node?.title || `Stage ${index + 1}`).trim();
+      const body = String(node?.body || "").trim();
+      return `${index + 1}. ${title}${body ? `: ${body}` : ""}`;
+    })
+    .join("\n")}`;
+}
+
 function languageInstruction(agent) {
   const lang = getLanguage(agent?.language);
   const gender = speakerGender(agent);
-  const gendered = gender === "male"
-    ? "You speak with a male voice. In Hindi and other gendered Indian languages use masculine first-person forms: करूंगा, रहा हूँ, गया. Never say करूंगी, रही, or गई."
-    : "You speak with a female voice. In Hindi and other gendered Indian languages use feminine first-person forms: करूंगी, रही हूँ, गई. Never say करूंगा.";
-  const shared = [
+  const gendered = lang.code === "en-IN"
+    ? ""
+    : gender === "male"
+      ? "You speak with a male voice. In Hindi and other gendered Indian languages use masculine first-person forms: करूंगा, रहा हूँ, गया. Never say करूंगी, रही, or गई."
+      : "You speak with a female voice. In Hindi and other gendered Indian languages use feminine first-person forms: करूंगी, रही हूँ, गई. Never say करूंगा.";
+  const settings = agent?.callSettings || {};
+  const numbers = settings.indicNumbers
+    ? "Speak numbers in Indic words in Hindi and other Indian languages. Example: 500 as paanch sau, not five hundred."
+    : "";
+  return [
     "Reply with spoken words only. No lists, markdown, emojis, question marks, or exclamation marks.",
     "Indian TTS voices read ? and ! out loud as 'question mark' and 'exclamation point'. Never write those characters.",
     "Do not add [END:...] until the customer has clearly given the success information, after at least two real customer replies.",
     "If the customer transcript is noise, punctuation, 'exclamation point', or 'question mark', briefly ask them to repeat. Do not end the call.",
     "If the customer asks to talk in English, Hindi, or another language, switch immediately on this turn and stay in that language until they ask again.",
-    "Do not keep the agent's default language after the customer asked to change. English mixed into a Hindi call is a switch when they asked for English.",
     gendered,
-  ].join(" ");
+    numbers,
+  ].filter(Boolean).join(" ");
+}
+
+function languageLock(agent) {
+  const lang = getLanguage(agent?.language);
   if (lang.code === "en-IN") {
-    return `This turn, speak natural Indian English. ${shared}`;
+    return "LANGUAGE LOCK for this turn: speak natural Indian English only. Use Latin letters. Do not write Devanagari, Hindi, Telugu, or any other script. Do not say जी, बिल्कुल, कृपया, बताइए, or mix Hindi into this reply. If an earlier turn was in another language, switch now.";
   }
-  return `This turn, speak ${lang.label} (${lang.native}) in the native script. Keep any [END:...] tag in ASCII English. ${shared}`;
+  return `LANGUAGE LOCK for this turn: speak ${lang.label} only, in the ${lang.native} script. Keep any [END:...] tag in ASCII English. Do not reply in English unless the customer asked for English.`;
 }
 
 export function buildModelMessages({ agent, history, userText, slots, knowledge }) {
@@ -52,7 +91,18 @@ export function buildModelMessages({ agent, history, userText, slots, knowledge 
     `Sound like a real agency person, not a generic assistant. One or two short sentences. Never more than 25 words.`,
     languageInstruction(agent),
     `Use case: ${agent.useCase}. Goal: ${agent.successCriteria}. The goal is what you work toward, not a reason to hang up on the first turn.`,
-    agent.persona ? `Persona: ${agent.persona}` : "",
+    compiledAgentInstructions(agent)
+      ? `Instructions:\n${compiledAgentInstructions(agent)}`
+      : agent.persona
+        ? `Persona: ${agent.persona}`
+        : "",
+    workflowInstruction(agent),
+    Array.isArray(agent.outputVariables) && agent.outputVariables.length
+      ? `After the call you must be able to fill these output variables from what was said: ${agent.outputVariables.map((item) => `${item.key} (${item.dataType || "string"}): ${item.prompt || ""}`).join("; ")}`
+      : "",
+    Array.isArray(agent.customTools) && agent.customTools.length
+      ? `Custom tools available (describe using them in speech only, never name the tool): ${agent.customTools.map((item) => item.name).join(", ")}`
+      : "",
     knowledge ? `Use this knowledge base only when the customer asks something factual. Never read it out as a list. Knowledge:\n${knowledge}` : "",
     slots && Object.keys(slots).length ? `Known details: ${JSON.stringify(slots)}` : "",
     `Reply with spoken words only.`,
@@ -71,6 +121,7 @@ export function buildModelMessages({ agent, history, userText, slots, knowledge 
   if (!last || last.role !== "user" || last.content !== userText) {
     messages.push({ role: "user", content: userText });
   }
+  messages.push({ role: "system", content: languageLock(agent) });
   return messages;
 }
 
@@ -108,10 +159,23 @@ export function guardEarlyHangup(parsed, call) {
 }
 
 export function followCustomerLanguage(call, agent, userText) {
+  const settings = agent?.callSettings || {};
   const current = call?.language || agent?.language || "en-IN";
-  const detected = detectLanguageFromText(userText, current);
-  if (call) call.language = detected;
-  return detected;
+  const requested = detectRequestedLanguage(userText);
+  if (settings.switchLanguage === false && !requested) {
+    if (call) call.language = current;
+    return current;
+  }
+  const detected = requested || (settings.autoDetectLanguage === false
+    ? current
+    : detectLanguageFromText(userText, current));
+  const allowed = settings.allowedLanguages;
+  let next = detected;
+  if (!requested && Array.isArray(allowed) && allowed.length && !allowed.includes(detected)) {
+    next = current;
+  }
+  if (call) call.language = next;
+  return next;
 }
 
 function withSpokenLanguage(agent, call) {
@@ -152,7 +216,7 @@ export async function* streamModelTokens({ agent, history, userText, slots, llm,
     headers: llmHeaders(llm),
     body: JSON.stringify({
       model: llm.model,
-      temperature: 0.35,
+      temperature: Number(agent?.callSettings?.temperature ?? 0.35),
       max_tokens: getLanguage(agent?.language).code === "en-IN" ? 90 : 140,
       stream: true,
       messages: buildModelMessages({ agent, history, userText, slots, knowledge }),
