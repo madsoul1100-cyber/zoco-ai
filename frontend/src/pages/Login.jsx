@@ -73,60 +73,38 @@ export default function Login({ setup, methods: initialMethods, onReady }) {
     const params = new URLSearchParams(window.location.search);
     const authError = params.get("authError");
     if (authError) setError(authError);
-    if (!initialMethods) {
-      api.authMe().then((data) => {
-        if (data.methods) setMethods(data.methods);
-      }).catch(() => {});
+    if (initialMethods) {
+      setMethods(initialMethods);
+      return;
     }
+    api.authMe().then((data) => {
+      if (data.methods) setMethods(data.methods);
+    }).catch(() => {});
   }, [initialMethods]);
 
-  useEffect(() => {
-    if (!methods.googleClientId) return undefined;
-    let cancelled = false;
-    const start = () => {
-      if (cancelled || !window.google?.accounts?.id) return;
-      window.google.accounts.id.initialize({
-        client_id: methods.googleClientId,
-        callback: async (response) => {
-          setBusy(true);
-          setError("");
-          try {
-            const result = await api.googleLogin({ credential: response.credential });
-            onReady(result.user);
-          } catch (err) {
-            setError(err.message);
-          } finally {
-            setBusy(false);
-          }
-        },
-      });
-    };
-    if (window.google?.accounts?.id) {
-      start();
-      return () => { cancelled = true; };
+  async function sendCode(event) {
+    event.preventDefault();
+    setBusy(true);
+    setError("");
+    try {
+      const result = await api.sendPhoneOtp({ phone: form.phone });
+      if (result.phone) setForm((current) => ({ ...current, phone: result.phone }));
+      setOtpSent(true);
+    } catch (err) {
+      setError(err.message);
+    } finally {
+      setBusy(false);
     }
-    const script = document.createElement("script");
-    script.src = "https://accounts.google.com/gsi/client";
-    script.async = true;
-    script.onload = start;
-    document.head.appendChild(script);
-    return () => { cancelled = true; };
-  }, [methods.googleClientId, onReady]);
+  }
 
   function continueGoogle() {
-    if (!methods.googleClientId) {
-      setError("Google sign-in isn’t connected yet. Use phone, email, or skip.");
+    if (!methods.google) {
+      setError("Add GOOGLE_CLIENT_ID and GOOGLE_CLIENT_SECRET in `.env`, then restart the API.");
       return;
     }
+    setBusy(true);
     setError("");
-    if (window.google?.accounts?.id) {
-      window.google.accounts.id.prompt((notification) => {
-        if (notification.isNotDisplayed() || notification.isSkippedMoment() || notification.isDismissedMoment()) {
-          window.location.assign("/api/auth/google");
-        }
-      });
-      return;
-    }
+    // Full OAuth redirect — most reliable for local + production
     window.location.assign("/api/auth/google");
   }
 
@@ -154,26 +132,16 @@ export default function Login({ setup, methods: initialMethods, onReady }) {
       setView("email");
       return;
     }
+    if (String(form.password || "").length < 6) {
+      setError("Password must be at least 6 characters.");
+      return;
+    }
     setBusy(true);
     setError("");
     try {
       const payload = { email: form.email, password: form.password, name: form.name };
       const result = tab === "create" || setup ? await api.register(payload) : await api.login(payload);
       onReady(result.user);
-    } catch (err) {
-      setError(err.message);
-    } finally {
-      setBusy(false);
-    }
-  }
-
-  async function sendCode(event) {
-    event.preventDefault();
-    setBusy(true);
-    setError("");
-    try {
-      await api.sendPhoneOtp({ phone: form.phone });
-      setOtpSent(true);
     } catch (err) {
       setError(err.message);
     } finally {
@@ -221,22 +189,36 @@ export default function Login({ setup, methods: initialMethods, onReady }) {
 
           {view === "home" ? (
             <>
-              <button className="login-method" type="button" disabled={busy} onClick={continueGoogle}>
-                <GoogleIcon />
-                Continue with Google
-              </button>
               <button
                 className="login-method"
                 type="button"
                 disabled={busy}
+                onClick={continueGoogle}
+              >
+                <GoogleIcon />
+                {busy ? "Opening Google…" : "Continue with Google"}
+              </button>
+
+              <button
+                className="login-method"
+                type="button"
+                disabled={busy || !methods.phone}
                 onClick={() => {
+                  if (!methods.phone) {
+                    setError("Phone login needs Twilio SMS connected.");
+                    return;
+                  }
                   setError("");
+                  setOtpSent(false);
                   setView("phone");
                 }}
               >
                 <PhoneIcon />
                 Continue with phone
               </button>
+              {!methods.phone ? (
+                <p className="login-hint">Phone needs Twilio SMS. Connect Twilio in Settings, then try again.</p>
+              ) : null}
 
               <div className="login-or"><span>or</span></div>
 
@@ -254,36 +236,66 @@ export default function Login({ setup, methods: initialMethods, onReady }) {
                   {busy ? "Please wait…" : "Continue"}
                 </button>
               </form>
+
+              <p className="login-switch">
+                {creating ? "Already have an account? " : "Don’t have an account? "}
+                <button
+                  type="button"
+                  onClick={() => {
+                    setTab(creating ? "signin" : "create");
+                    setError("");
+                  }}
+                >
+                  {creating ? "Sign in" : "Create one"}
+                </button>
+              </p>
             </>
           ) : null}
 
           {view === "phone" ? (
             <form className="login-form" onSubmit={otpSent ? verifyCode : sendCode}>
-              <input
-                className="login-field"
-                value={form.phone}
-                onChange={(e) => setForm({ ...form, phone: e.target.value })}
-                placeholder="+91 98765 43210"
-                autoComplete="tel"
-                required
-              />
-              {otpSent ? (
+              {!otpSent ? (
                 <input
                   className="login-field"
-                  value={form.code}
-                  onChange={(e) => setForm({ ...form, code: e.target.value })}
-                  placeholder="6-digit code"
-                  inputMode="numeric"
-                  autoComplete="one-time-code"
+                  value={form.phone}
+                  onChange={(e) => setForm({ ...form, phone: e.target.value })}
+                  placeholder="+91 98765 43210"
+                  autoComplete="tel"
+                  inputMode="tel"
                   required
+                  autoFocus
                 />
-              ) : null}
+              ) : (
+                <>
+                  <p className="login-email">Code sent to {form.phone}</p>
+                  <input
+                    className="login-field"
+                    value={form.code}
+                    onChange={(e) => setForm({ ...form, code: e.target.value.replace(/\D/g, "").slice(0, 6) })}
+                    placeholder="6-digit code"
+                    inputMode="numeric"
+                    autoComplete="one-time-code"
+                    required
+                    autoFocus
+                  />
+                </>
+              )}
               <button className="login-continue" type="submit" disabled={busy || !methods.phone}>
                 {busy ? "Please wait…" : otpSent ? "Verify and continue" : "Send SMS code"}
               </button>
-              {!methods.phone ? <p className="login-hint">Phone login needs SMS connected.</p> : null}
               {otpSent ? (
-                <button className="login-text" type="button" onClick={() => setOtpSent(false)}>Use a different number</button>
+                <button
+                  className="login-text"
+                  type="button"
+                  disabled={busy}
+                  onClick={() => {
+                    setOtpSent(false);
+                    setForm({ ...form, code: "" });
+                    setError("");
+                  }}
+                >
+                  Use a different number
+                </button>
               ) : null}
               <button
                 className="login-text"
@@ -291,6 +303,7 @@ export default function Login({ setup, methods: initialMethods, onReady }) {
                 onClick={() => {
                   setView("home");
                   setOtpSent(false);
+                  setForm({ ...form, code: "" });
                   setError("");
                 }}
               >
@@ -316,9 +329,11 @@ export default function Login({ setup, methods: initialMethods, onReady }) {
                 type="password"
                 value={form.password}
                 onChange={(e) => setForm({ ...form, password: e.target.value })}
-                placeholder="Password"
+                placeholder={creating ? "Create a password" : "Password"}
                 autoComplete={creating ? "new-password" : "current-password"}
+                minLength={6}
                 required
+                autoFocus
               />
               <button className="login-continue" type="submit" disabled={busy}>
                 {busy ? "Please wait…" : creating ? (setup ? "Create workspace" : "Create account") : "Continue"}
@@ -328,6 +343,7 @@ export default function Login({ setup, methods: initialMethods, onReady }) {
                 type="button"
                 onClick={() => {
                   setView("home");
+                  setForm({ ...form, password: "" });
                   setError("");
                 }}
               >
@@ -336,19 +352,20 @@ export default function Login({ setup, methods: initialMethods, onReady }) {
             </form>
           ) : null}
 
-          <p className="login-switch">
-            {creating ? "Already have an account? " : "Don’t have an account? "}
-            <button
-              type="button"
-              onClick={() => {
-                setTab(creating ? "signin" : "create");
-                setView("home");
-                setError("");
-              }}
-            >
-              {creating ? "Sign in" : "Create one"}
-            </button>
-          </p>
+          {view === "email" ? (
+            <p className="login-switch">
+              {creating ? "Already have an account? " : "Don’t have an account? "}
+              <button
+                type="button"
+                onClick={() => {
+                  setTab(creating ? "signin" : "create");
+                  setError("");
+                }}
+              >
+                {creating ? "Sign in" : "Create one"}
+              </button>
+            </p>
+          ) : null}
 
           {methods.skip !== false ? (
             <button className="login-skip" type="button" disabled={busy} onClick={skipNow}>

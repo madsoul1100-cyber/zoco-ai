@@ -184,6 +184,7 @@ export async function createUser({ email, password, name, role, phone }) {
   const normalizedPhone = phone ? normalizePhone(phone) : "";
   if (!normalized && !normalizedPhone) throw new Error("Email or phone number is required");
   if (normalized && !password) throw new Error("Email and password are required");
+  if (normalized && String(password).length < 6) throw new Error("Password must be at least 6 characters");
   if (normalized && (await getUserByEmail(normalized))) throw new Error("That email already has an account. Sign in instead.");
   if (normalizedPhone && (await getUserByPhone(normalizedPhone))) throw new Error("That phone number already has an account. Sign in instead.");
   const now = new Date().toISOString();
@@ -345,10 +346,11 @@ export async function verifyPhoneOtp(rawPhone, code) {
 export async function authMethods() {
   const tel = await resolveTelephony();
   const googleClientId = String(process.env.GOOGLE_CLIENT_ID || "").trim();
+  const googleSecret = String(process.env.GOOGLE_CLIENT_SECRET || "").trim();
   return {
     email: true,
-    google: Boolean(googleClientId),
-    googleClientId,
+    google: Boolean(googleClientId && googleSecret),
+    googleClientId: googleClientId && googleSecret ? googleClientId : "",
     phone: Boolean(tel.twilioReady || process.env.TWILIO_VERIFY_SERVICE_SID),
     skip: skipLoginAllowed(),
   };
