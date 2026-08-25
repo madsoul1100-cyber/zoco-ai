@@ -65,6 +65,52 @@ function twilioAuth(tel) {
   return `Basic ${Buffer.from(`${tel.accountSid}:${tel.authToken}`).toString("base64")}`;
 }
 
+export async function sendSms({ tel, to, body }) {
+  if (!tel?.accountSid || !tel?.authToken || !tel?.fromNumber) {
+    throw new Error("Twilio SMS is not connected");
+  }
+  const data = await twilioJson(
+    `https://api.twilio.com/2010-04-01/Accounts/${tel.accountSid}/Messages.json`,
+    {
+      tel,
+      method: "POST",
+      body: new URLSearchParams({ To: to, From: tel.fromNumber, Body: body }),
+    }
+  );
+  return data;
+}
+
+export async function sendVerifySms(tel, to) {
+  const sid = process.env.TWILIO_VERIFY_SERVICE_SID;
+  if (!sid) return null;
+  const response = await fetch(`https://verify.twilio.com/v2/Services/${sid}/Verifications`, {
+    method: "POST",
+    headers: {
+      Authorization: twilioAuth(tel),
+      "Content-Type": "application/x-www-form-urlencoded",
+    },
+    body: new URLSearchParams({ To: to, Channel: "sms" }),
+  });
+  const data = await response.json().catch(() => ({}));
+  if (!response.ok) throw new Error(data.message || "Could not send the verification SMS");
+  return data;
+}
+
+export async function checkVerifySms(tel, to, code) {
+  const sid = process.env.TWILIO_VERIFY_SERVICE_SID;
+  if (!sid) return null;
+  const response = await fetch(`https://verify.twilio.com/v2/Services/${sid}/VerificationCheck`, {
+    method: "POST",
+    headers: {
+      Authorization: twilioAuth(tel),
+      "Content-Type": "application/x-www-form-urlencoded",
+    },
+    body: new URLSearchParams({ To: to, Code: String(code || "") }),
+  });
+  const data = await response.json().catch(() => ({}));
+  return data.status === "approved";
+}
+
 function sameUrl(left, right) {
   const a = String(left || "").replace(/\/$/, "");
   const b = String(right || "").replace(/\/$/, "");

@@ -2094,6 +2094,29 @@ details.product-sheet > summary::-webkit-details-marker { display: none; }
 .login-card {
   width: min(420px, 100%);
 }
+.login-or {
+  margin: 4px 0;
+  text-align: center;
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 800;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+.login-tabs {
+  justify-content: center;
+}
+.skip-login {
+  width: 100%;
+}
+.google-btn {
+  min-height: 44px;
+  display: grid;
+  place-items: center;
+}
+.google-fallback {
+  text-align: center;
+}
 .nav-footer .link-quiet {
   display: block;
   margin-top: 8px;

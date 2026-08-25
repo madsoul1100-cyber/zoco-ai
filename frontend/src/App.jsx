@@ -110,7 +110,13 @@ export default function App() {
 
   if (session === undefined) return <p className="muted" style={{ padding: 24 }}>Loading workspace…</p>;
   if (!session.user) {
-    return <Login setup={Boolean(session.setup)} onReady={(user) => setSession({ user, setup: false })} />;
+    return (
+      <Login
+        setup={Boolean(session.setup)}
+        methods={session.methods}
+        onReady={(user) => setSession({ user, setup: false, methods: session.methods })}
+      />
+    );
   }
 
   return (
@@ -150,7 +156,7 @@ export default function App() {
             </NavLink>
           ))}
           <button className="link-quiet" type="button" onClick={() => api.logout().then(() => setSession({ user: null, setup: false }))}>
-            Sign out {session.user?.email ? `(${session.user.email})` : ""}
+            {session.user?.guest ? "Sign in" : `Sign out${session.user?.email ? ` (${session.user.email})` : ""}`}
           </button>
         </div>
       </aside>

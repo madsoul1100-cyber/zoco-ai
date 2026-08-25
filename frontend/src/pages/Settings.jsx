@@ -135,8 +135,8 @@ export default function Settings() {
         <p className="muted">People who can open this Zoco workspace.</p>
         {members.map((member) => (
           <div className="row" key={member.id}>
-            <strong>{member.name || member.email}</strong>
-            <span className="muted">{member.email} · {member.role}</span>
+            <strong>{member.name || member.email || member.phone}</strong>
+            <span className="muted">{[member.email, member.phone, member.role].filter(Boolean).join(" · ")}</span>
             <button className="btn ghost" type="button" onClick={() => api.deleteMember(member.id).then(() => setMembers(members.filter((item) => item.id !== member.id)))}>Remove</button>
           </div>
         ))}
