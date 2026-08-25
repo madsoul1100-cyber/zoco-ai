@@ -278,7 +278,49 @@ export function defaultInbound() {
   };
 }
 
+export async function listInbounds() {
+  return (await col("inbounds").find({}).sort({ updatedAt: -1 }).toArray()).map(fromDoc);
+}
+
+export async function getInboundById(id) {
+  return fromDoc(await col("inbounds").findOne({ _id: id }));
+}
+
+export async function saveInboundDeployment(item) {
+  item.updatedAt = new Date().toISOString();
+  await col("inbounds").replaceOne({ _id: item.id }, toDoc(item), { upsert: true });
+  return item;
+}
+
+export async function deleteInboundDeployment(id) {
+  await col("inbounds").deleteOne({ _id: id });
+}
+
+export async function getDnd() {
+  const stored = (await col("settings").findOne({ _id: "dnd" })) || {};
+  return { numbers: Array.isArray(stored.numbers) ? stored.numbers : [] };
+}
+
+export async function saveDnd(payload) {
+  const numbers = [...new Set((payload?.numbers || []).map((item) => String(item || "").trim()).filter(Boolean))];
+  const next = { numbers, updatedAt: new Date().toISOString() };
+  await col("settings").replaceOne({ _id: "dnd" }, { _id: "dnd", ...next }, { upsert: true });
+  return next;
+}
+
 export async function getInbound() {
+  const live = (await listInbounds()).find((item) => item.status === "live" || item.enabled);
+  if (live) {
+    return {
+      enabled: live.status === "live" || live.enabled === true,
+      agentId: live.agentId || "",
+      phoneNumber: live.phoneNumber || "",
+      greeting: live.greeting || "",
+      record: live.record !== false,
+      updatedAt: live.updatedAt || null,
+      inboundId: live.id,
+    };
+  }
   const stored = (await col("settings").findOne({ _id: "inbound" })) || {};
   const { _id, ...rest } = stored;
   return { ...defaultInbound(), ...rest };
@@ -287,6 +329,21 @@ export async function getInbound() {
 export async function saveInbound(config) {
   const next = { ...defaultInbound(), ...config, updatedAt: new Date().toISOString() };
   await col("settings").replaceOne({ _id: "inbound" }, { _id: "inbound", ...next }, { upsert: true });
+  if (next.inboundId) {
+    const existing = await getInboundById(next.inboundId);
+    if (existing) {
+      await saveInboundDeployment({
+        ...existing,
+        enabled: next.enabled,
+        status: next.enabled ? "live" : "paused",
+        agentId: next.agentId,
+        phoneNumber: next.phoneNumber,
+        greeting: next.greeting,
+        record: next.record,
+        pausedAt: next.enabled ? null : new Date().toISOString(),
+      });
+    }
+  }
   return next;
 }
 
@@ -310,4 +367,13 @@ export async function deleteCampaign(id) {
 
 export async function listCallsByCampaign(campaignId) {
   return (await col("calls").find({ campaignId }).sort({ updatedAt: -1 }).limit(500).toArray()).map(fromDoc);
+}
+
+export async function listCallsByDirection(direction) {
+  return (await col("calls").find({ direction }).sort({ startedAt: -1, createdAt: -1 }).limit(200).toArray()).map(fromDoc);
+}
+
+export async function listCallsByInbound(inboundId) {
+  if (!inboundId) return [];
+  return (await col("calls").find({ inboundId }).sort({ startedAt: -1 }).limit(100).toArray()).map(fromDoc);
 }

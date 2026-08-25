@@ -18,6 +18,8 @@ export async function connectMongo() {
     db.collection("knowledgeBases").createIndex({ updatedAt: -1 }),
     db.collection("campaigns").createIndex({ updatedAt: -1 }),
     db.collection("campaigns").createIndex({ status: 1 }),
+    db.collection("inbounds").createIndex({ updatedAt: -1 }),
+    db.collection("inbounds").createIndex({ status: 1 }),
     db.collection("calls").createIndex({ twilioSid: 1 }),
     db.collection("turns").createIndex({ callId: 1, timestamp: 1 }),
     db.collection("turns").createIndex({ createdAt: -1 }),

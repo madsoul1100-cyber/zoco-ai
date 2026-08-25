@@ -48,6 +48,7 @@ import {
   listAgents,
   listCalls,
   listContacts,
+  listInbounds,
   saveAgent,
   saveAiSettings,
   saveCall,
@@ -775,10 +776,24 @@ async function findCallFromTwilio(req) {
 app.post("/webhooks/twilio/inbound", handleInboundCall);
 app.get("/webhooks/twilio/inbound", handleInboundCall);
 
+async function resolveInboundLine(to) {
+  const items = await listInbounds();
+  const match = items.find((item) => item.phoneNumber && normalizePhone(item.phoneNumber) === to && (item.status === "live" || item.enabled));
+  const live = match || items.find((item) => item.status === "live" || item.enabled);
+  if (live) {
+    return {
+      ...live,
+      enabled: live.status === "live" || live.enabled === true,
+      inboundId: live.id,
+    };
+  }
+  return getInbound();
+}
+
 async function handleInboundCall(req, res) {
-  const inbound = await getInbound();
   const from = normalizePhone(req.body?.From || req.query?.From);
   const to = normalizePhone(req.body?.To || req.query?.To);
+  const inbound = await resolveInboundLine(to);
   const twilioSid = req.body?.CallSid || req.query?.CallSid || null;
   if (!twilioSid) {
     return sendTwiml(res, hangupTwiml({ say: "", language: "en-IN" }));
@@ -808,6 +823,8 @@ async function handleInboundCall(req, res) {
     id: `call_${uuid().slice(0, 10)}`,
     agentId: agent.id,
     agentName: agent.name,
+    inboundId: inbound.inboundId || inbound.id || "",
+    toNumber: to || inbound.phoneNumber || "",
     direction: "inbound",
     channel: "telephony",
     twilioSid,

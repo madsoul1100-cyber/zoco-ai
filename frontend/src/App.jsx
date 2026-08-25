@@ -8,10 +8,13 @@ import Calling from "./pages/Calling.jsx";
 import Calls from "./pages/Calls.jsx";
 import CampaignDetail from "./pages/CampaignDetail.jsx";
 import Campaigns from "./pages/Campaigns.jsx";
+import CampaignSchedules from "./pages/CampaignSchedules.jsx";
 import Dashboard from "./pages/Dashboard.jsx";
 import DeployCode from "./pages/DeployCode.jsx";
+import DndList from "./pages/DndList.jsx";
 import Docs from "./pages/Docs.jsx";
 import Inbound from "./pages/Inbound.jsx";
+import InboundDetail from "./pages/InboundDetail.jsx";
 import Knowledge from "./pages/Knowledge.jsx";
 import KnowledgeDetail from "./pages/KnowledgeDetail.jsx";
 import PhoneNumbers from "./pages/PhoneNumbers.jsx";
@@ -145,7 +148,10 @@ export default function App() {
             <Route path="/knowledge/:id" element={<KnowledgeDetail />} />
             <Route path="/phone-numbers" element={<PhoneNumbers />} />
             <Route path="/inbound" element={<Inbound />} />
+            <Route path="/inbound/:id" element={<InboundDetail />} />
             <Route path="/campaigns" element={<Campaigns />} />
+            <Route path="/campaigns/dnd" element={<DndList />} />
+            <Route path="/campaigns/:id/schedules" element={<CampaignSchedules />} />
             <Route path="/campaigns/:id" element={<CampaignDetail />} />
             <Route path="/deploy" element={<DeployCode />} />
             <Route path="/analytics" element={<Analytics />} />

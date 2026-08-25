@@ -1,26 +1,45 @@
 import { v4 as uuid } from "uuid";
 import { generateAgentFromPrompt, reviseAgentFromPrompt } from "../engine/generate.js";
 import { dashboardStats } from "../engine/rules.js";
-import { buildAnalytics } from "../engine/analytics.js";
+import { buildAnalytics, timeSeries } from "../engine/analytics.js";
+import {
+  ensureCampaignShape,
+  ensureInboundShape,
+  formatSchedule,
+  isDndListed,
+  parseContactRows,
+  publicCampaign,
+  publicInboundCall,
+  retryBreakdown,
+  toLegacyInbound,
+} from "../engine/deploy.js";
 import { normalizeLanguage } from "../languages.js";
 import { normalizePhone } from "../phone.js";
 import { queueOrDial } from "../services/calling.js";
 import {
   deleteCampaign,
+  deleteInboundDeployment,
   deleteKnowledgeBase,
   getAgent,
   getCampaign,
+  getDnd,
   getInbound,
+  getInboundById,
   getKnowledgeBase,
   listAgents,
   listCalls,
   listCallsByCampaign,
+  listCallsByDirection,
+  listCallsByInbound,
   listCampaigns,
+  listInbounds,
   listKnowledgeBases,
   saveAgent,
   saveCall,
   saveCampaign,
+  saveDnd,
   saveInbound,
+  saveInboundDeployment,
   saveKnowledgeBase,
 } from "../store.js";
 import { inboundLineStatus, publicTelephony, resolveTelephony, syncInboundWebhook } from "../telephony/twilio.js";
@@ -169,6 +188,59 @@ export function mountProductRoutes(app, { upload } = {}) {
     res.json(publicKnowledge(await saveKnowledgeBase(kb)));
   });
 
+  async function decorateInbound(item, tel, line) {
+    const shaped = ensureInboundShape(item, tel);
+    const live = Boolean(shaped.status === "live" && shaped.agentId && tel.twilioReady && line.wired);
+    return {
+      ...shaped,
+      scheduleLabel: formatSchedule(shaped.schedule),
+      phoneNumber: shaped.phoneNumber || tel.fromNumber || "",
+      telephony: publicTelephony(tel),
+      line,
+      live,
+    };
+  }
+
+  async function seedInbounds(tel) {
+    const existing = await listInbounds();
+    if (existing.length) return existing.map((item) => ensureInboundShape(item, tel));
+    const legacy = await getInbound();
+    if (!legacy.agentId && !legacy.phoneNumber && !legacy.enabled) return [];
+    const agent = legacy.agentId ? await getAgent(legacy.agentId) : null;
+    const seeded = await saveInboundDeployment(ensureInboundShape({
+      id: `inb_${uuid().slice(0, 8)}`,
+      name: agent?.name ? `${agent.name} inbound` : "Inbound",
+      agentId: legacy.agentId,
+      agentName: agent?.name || "",
+      phoneNumber: legacy.phoneNumber || tel.fromNumber || "",
+      greeting: legacy.greeting,
+      record: legacy.record,
+      enabled: legacy.enabled,
+      status: legacy.enabled ? "live" : "paused",
+      createdAt: legacy.updatedAt || new Date().toISOString(),
+    }, tel));
+    return [seeded];
+  }
+
+  async function wireInbound(enabled) {
+    const tel = await resolveTelephony();
+    let line = await inboundLineStatus(tel);
+    if (tel.twilioReady) {
+      try {
+        const synced = await syncInboundWebhook(tel);
+        line = await inboundLineStatus(tel);
+        if (synced.error) line = { ...line, error: synced.error };
+      } catch (error) {
+        line = { ...(line || {}), wired: false, error: error.message };
+        if (enabled) throw error;
+      }
+    }
+    if (enabled && !line.wired) {
+      throw new Error(line.error || "Could not point this Twilio number at the inbound webhook.");
+    }
+    return { tel, line };
+  }
+
   app.get("/api/inbound", async (_req, res) => {
     const inbound = await getInbound();
     const tel = await resolveTelephony();
@@ -194,47 +266,163 @@ export function mountProductRoutes(app, { upload } = {}) {
       const agent = await getAgent(agentId);
       if (!agent) return res.status(400).json({ error: "Choose an existing agent" });
     }
+    try {
+      const { tel, line } = await wireInbound(enabled);
+      const saved = await saveInbound({
+        ...current,
+        ...req.body,
+        enabled,
+        agentId,
+        phoneNumber: normalizePhone(req.body?.phoneNumber || current.phoneNumber || tel.fromNumber),
+      });
+      const live = Boolean(saved.enabled && saved.agentId && tel.twilioReady && line.wired);
+      res.json({ ...saved, telephony: publicTelephony(tel), line, live });
+    } catch (error) {
+      res.status(400).json({ error: error.message });
+    }
+  });
+
+  app.get("/api/inbounds", async (_req, res) => {
     const tel = await resolveTelephony();
-    let line = await inboundLineStatus(tel);
-    if (tel.twilioReady) {
-      try {
-        const synced = await syncInboundWebhook(tel);
-        line = await inboundLineStatus(tel);
-        if (synced.error) line = { ...line, error: synced.error };
-      } catch (error) {
-        line = { ...(line || {}), wired: false, error: error.message };
-        if (enabled) {
-          return res.status(400).json({ error: error.message });
+    const line = await inboundLineStatus(tel);
+    const items = await seedInbounds(tel);
+    res.json(await Promise.all(items.map((item) => decorateInbound(item, tel, line))));
+  });
+
+  app.post("/api/inbounds", async (req, res) => {
+    const agent = await getAgent(req.body?.agentId);
+    if (!agent) return res.status(400).json({ error: "Choose an agent first" });
+    const tel = await resolveTelephony();
+    const line = await inboundLineStatus(tel);
+    const now = new Date().toISOString();
+    const saved = await saveInboundDeployment(ensureInboundShape({
+      id: `inb_${uuid().slice(0, 8)}`,
+      name: req.body?.name || `${agent.name} inbound`,
+      agentId: agent.id,
+      agentName: agent.name,
+      phoneNumber: normalizePhone(req.body?.phoneNumber || tel.fromNumber),
+      greeting: req.body?.greeting || agent.greeting || "",
+      status: "paused",
+      enabled: false,
+      schedule: req.body?.schedule,
+      createdAt: now,
+    }, tel));
+    res.status(201).json(await decorateInbound(saved, tel, line));
+  });
+
+  app.get("/api/inbounds/:id", async (req, res) => {
+    const tel = await resolveTelephony();
+    const line = await inboundLineStatus(tel);
+    const item = await getInboundById(req.params.id);
+    if (!item) return res.status(404).json({ error: "Inbound not found" });
+    const inbound = await decorateInbound(item, tel, line);
+    const calls = await listCallsByInbound(item.id);
+    const fallback = calls.length ? calls : (await listCallsByDirection("inbound"))
+      .filter((call) => call.agentId === item.agentId || call.toNumber === inbound.phoneNumber)
+      .slice(0, 20);
+    res.json({
+      ...inbound,
+      recentCalls: fallback.map((call) => publicInboundCall(call, inbound.phoneNumber)),
+    });
+  });
+
+  app.put("/api/inbounds/:id", async (req, res) => {
+    const existing = await getInboundById(req.params.id);
+    if (!existing) return res.status(404).json({ error: "Inbound not found" });
+    const tel = await resolveTelephony();
+    const line = await inboundLineStatus(tel);
+    const agent = req.body?.agentId ? await getAgent(req.body.agentId) : null;
+    const saved = await saveInboundDeployment(ensureInboundShape({
+      ...existing,
+      ...req.body,
+      id: existing.id,
+      agentName: agent?.name || existing.agentName,
+      phoneNumber: normalizePhone(req.body?.phoneNumber || existing.phoneNumber || tel.fromNumber),
+    }, tel));
+    res.json(await decorateInbound(saved, tel, line));
+  });
+
+  app.post("/api/inbounds/:id/resume", async (req, res) => {
+    const existing = await getInboundById(req.params.id);
+    if (!existing) return res.status(404).json({ error: "Inbound not found" });
+    if (!existing.agentId) return res.status(400).json({ error: "Assign an agent before going live" });
+    try {
+      const { tel, line } = await wireInbound(true);
+      const others = await listInbounds();
+      for (const item of others) {
+        if (item.id === existing.id) continue;
+        if (item.status === "live") {
+          await saveInboundDeployment({ ...item, status: "paused", enabled: false, pausedAt: new Date().toISOString() });
         }
       }
-    }
-    if (enabled && !line.wired) {
-      return res.status(400).json({
-        error: line.error || "Could not point this Twilio number at the inbound webhook. Check ngrok and Twilio credentials.",
+      const saved = await saveInboundDeployment({
+        ...ensureInboundShape(existing, tel),
+        status: "live",
+        enabled: true,
+        pausedAt: null,
       });
+      await saveInbound(toLegacyInbound(saved));
+      res.json(await decorateInbound(saved, tel, line));
+    } catch (error) {
+      res.status(400).json({ error: error.message });
     }
-    const saved = await saveInbound({
-      ...current,
-      ...req.body,
-      enabled,
-      agentId,
-      phoneNumber: normalizePhone(req.body?.phoneNumber || current.phoneNumber || tel.fromNumber),
+  });
+
+  app.post("/api/inbounds/:id/pause", async (req, res) => {
+    const existing = await getInboundById(req.params.id);
+    if (!existing) return res.status(404).json({ error: "Inbound not found" });
+    const tel = await resolveTelephony();
+    const line = await inboundLineStatus(tel);
+    const saved = await saveInboundDeployment({
+      ...ensureInboundShape(existing, tel),
+      status: "paused",
+      enabled: false,
+      pausedAt: new Date().toISOString(),
     });
-    const live = Boolean(saved.enabled && saved.agentId && tel.twilioReady && line.wired);
-    res.json({ ...saved, telephony: publicTelephony(tel), line, live });
+    await saveInbound(toLegacyInbound(saved));
+    res.json(await decorateInbound(saved, tel, line));
+  });
+
+  app.delete("/api/inbounds/:id", async (req, res) => {
+    await deleteInboundDeployment(req.params.id);
+    res.json({ ok: true });
+  });
+
+  app.get("/api/dnd", async (_req, res) => {
+    res.json(await getDnd());
+  });
+
+  app.put("/api/dnd", async (req, res) => {
+    res.json(await saveDnd(req.body));
+  });
+
+  app.get("/api/campaigns/overview", async (req, res) => {
+    const hours = Number(req.query.hours || 24);
+    const [campaigns, calls] = await Promise.all([listCampaigns(), listCalls()]);
+    const outbound = calls.filter((call) => call.direction !== "inbound");
+    res.json({
+      hours,
+      total: outbound.filter((call) => {
+        const time = Date.parse(call.startedAt || call.createdAt || 0);
+        return time && time >= Date.now() - hours * 3600000;
+      }).length,
+      activity: timeSeries(outbound, { hours, grainMinutes: 60 }),
+      concurrency: timeSeries(outbound, { hours, grainMinutes: 60 }),
+      campaigns: campaigns.map((campaign) => ensureCampaignShape(campaign)),
+    });
   });
 
   app.get("/api/campaigns", async (_req, res) => {
     const campaigns = await listCampaigns();
-    res.json(campaigns);
+    res.json(campaigns.map((campaign) => ensureCampaignShape(campaign)));
   });
 
   app.post("/api/campaigns", async (req, res) => {
     const agent = await getAgent(req.body?.agentId);
     if (!agent) return res.status(400).json({ error: "Choose an agent first" });
     const now = new Date().toISOString();
-    const contacts = Array.isArray(req.body?.contacts) ? req.body.contacts : [];
-    const campaign = await saveCampaign({
+    const parsed = parseContactRows(req.body?.contacts || []);
+    const campaign = await saveCampaign(ensureCampaignShape({
       id: `cmp_${uuid().slice(0, 8)}`,
       name: req.body?.name || `${agent.name} campaign`,
       agentId: agent.id,
@@ -242,41 +430,72 @@ export function mountProductRoutes(app, { upload } = {}) {
       language: normalizeLanguage(req.body?.language || agent.language),
       status: "draft",
       concurrency: Number(req.body?.concurrency || 1),
-      contacts: contacts.map((item) => ({
-        id: item.id || `row_${uuid().slice(0, 6)}`,
-        name: item.name || "Customer",
-        phone: normalizePhone(item.phone),
-        notes: item.notes || "",
-      })).filter((item) => item.phone),
+      schedule: req.body?.schedule,
+      contacts: parsed.valid,
       launchedAt: null,
       createdAt: now,
       updatedAt: now,
-    });
+    }));
     res.status(201).json(campaign);
   });
 
   app.get("/api/campaigns/:id", async (req, res) => {
     const campaign = await getCampaign(req.params.id);
     if (!campaign) return res.status(404).json({ error: "Campaign not found" });
+    const hours = Number(req.query.hours || 24);
+    const grain = req.query.grain === "minute" ? 1 : 60;
     const calls = await listCallsByCampaign(campaign.id);
-    res.json({ ...campaign, calls, stats: dashboardStats(calls) });
+    const shaped = publicCampaign(campaign, calls);
+    res.json({
+      ...shaped,
+      scheduleLabel: formatSchedule(shaped.schedule),
+      activity: timeSeries(calls, { hours, grainMinutes: grain }),
+      dash: dashboardStats(calls),
+    });
   });
 
   app.put("/api/campaigns/:id", async (req, res) => {
     const existing = await getCampaign(req.params.id);
     if (!existing) return res.status(404).json({ error: "Campaign not found" });
-    const next = { ...existing, ...req.body, id: existing.id };
-    if (Array.isArray(req.body?.contacts)) {
-      next.contacts = req.body.contacts
-        .map((item) => ({
-          id: item.id || `row_${uuid().slice(0, 6)}`,
-          name: item.name || "Customer",
-          phone: normalizePhone(item.phone),
-          notes: item.notes || "",
-        }))
-        .filter((item) => item.phone);
-    }
+    const next = ensureCampaignShape({ ...existing, ...req.body, id: existing.id });
+    if (Array.isArray(req.body?.contacts)) next.contacts = parseContactRows(req.body.contacts).valid;
+    if (Array.isArray(req.body?.cohorts)) next.cohorts = req.body.cohorts;
     res.json(await saveCampaign(next));
+  });
+
+  app.post("/api/campaigns/:id/cohorts", async (req, res) => {
+    const existing = await getCampaign(req.params.id);
+    if (!existing) return res.status(404).json({ error: "Campaign not found" });
+    const shaped = ensureCampaignShape(existing);
+    const parsed = parseContactRows((req.body?.contacts || []).map((row) => ({ ...row })));
+    const cohort = {
+      id: `coh_${uuid().slice(0, 8)}`,
+      name: req.body?.name || `cohort_${(shaped.cohorts.length + 1).toString().padStart(2, "0")}`,
+      status: "completed",
+      validRecords: parsed.valid.length,
+      invalidRecords: parsed.invalid.length,
+      uploadedAt: new Date().toISOString(),
+      contacts: parsed.valid.map((row) => ({ ...row, cohortId: undefined })),
+    };
+    cohort.contacts = parsed.valid.map((row) => ({ ...row, cohortId: cohort.id }));
+    shaped.cohorts = [...shaped.cohorts, cohort];
+    const saved = await saveCampaign(ensureCampaignShape(shaped));
+    res.status(201).json(saved);
+  });
+
+  app.get("/api/campaigns/:id/retries", async (req, res) => {
+    const campaign = await getCampaign(req.params.id);
+    if (!campaign) return res.status(404).json({ error: "Campaign not found" });
+    const calls = await listCallsByCampaign(campaign.id);
+    const cohortId = req.query.cohortId || "";
+    const subset = cohortId
+      ? calls.filter((call) => call.cohortId === cohortId || call.customer?.cohortId === cohortId)
+      : calls;
+    res.json({
+      cohortId,
+      numbers: subset.length,
+      breakdown: retryBreakdown(subset),
+    });
   });
 
   app.delete("/api/campaigns/:id", async (req, res) => {
@@ -284,21 +503,28 @@ export function mountProductRoutes(app, { upload } = {}) {
     res.json({ ok: true });
   });
 
-  app.post("/api/campaigns/:id/launch", async (req, res) => {
+  async function launchCampaign(req, res) {
     const campaign = await getCampaign(req.params.id);
     if (!campaign) return res.status(404).json({ error: "Campaign not found" });
-    const agent = await getAgent(campaign.agentId);
+    const shaped = ensureCampaignShape(campaign);
+    const agent = await getAgent(shaped.agentId);
     if (!agent) return res.status(400).json({ error: "Campaign agent is missing" });
     const now = new Date().toISOString();
     const tel = await resolveTelephony();
+    const dnd = await getDnd();
+    const existingCalls = await listCallsByCampaign(shaped.id);
+    const already = new Set(existingCalls.map((call) => normalizePhone(call.customer?.phone)));
     const created = [];
-    for (const row of campaign.contacts || []) {
+    for (const row of shaped.contacts || []) {
+      if (isDndListed(row.phone, dnd.numbers)) continue;
+      if (already.has(normalizePhone(row.phone))) continue;
       const call = {
         id: `call_${uuid().slice(0, 10)}`,
         agentId: agent.id,
         agentName: agent.name,
-        campaignId: campaign.id,
-        campaignName: campaign.name,
+        campaignId: shaped.id,
+        campaignName: shaped.name,
+        cohortId: row.cohortId || "",
         direction: "outbound",
         channel: "voice",
         customer: { name: row.name, phone: row.phone, notes: row.notes || "" },
@@ -311,7 +537,7 @@ export function mountProductRoutes(app, { upload } = {}) {
         durationSeconds: 0,
         recordingUrl: null,
         gathered: {},
-        language: campaign.language || agent.language,
+        language: shaped.language || agent.language,
         outcomeReason: null,
         recall: { needed: false, reason: null, scheduledAt: null, attempt: 1, maxAttempts: 3 },
         createdAt: now,
@@ -319,13 +545,14 @@ export function mountProductRoutes(app, { upload } = {}) {
           {
             id: `msg_${uuid().slice(0, 8)}`,
             role: "system",
-            text: `Campaign ${campaign.name} · queued ${row.phone}`,
+            text: `Campaign ${shaped.name} · queued ${row.phone}`,
             timestamp: now,
             audioOffsetMs: 0,
           },
         ],
       };
       await saveCall(call);
+      already.add(normalizePhone(row.phone));
       if (!tel.twilioReady) {
         created.push(call);
         continue;
@@ -339,17 +566,22 @@ export function mountProductRoutes(app, { upload } = {}) {
         created.push(await saveCall(call));
       }
     }
-    campaign.status = "running";
-    campaign.launchedAt = now;
-    await saveCampaign(campaign);
-    res.json({ campaign, calls: created });
-  });
+    shaped.status = "running";
+    shaped.launchedAt = shaped.launchedAt || now;
+    shaped.pausedAt = null;
+    await saveCampaign(shaped);
+    res.json({ campaign: shaped, calls: created });
+  }
+
+  app.post("/api/campaigns/:id/launch", launchCampaign);
+  app.post("/api/campaigns/:id/resume", launchCampaign);
 
   app.post("/api/campaigns/:id/pause", async (req, res) => {
     const campaign = await getCampaign(req.params.id);
     if (!campaign) return res.status(404).json({ error: "Campaign not found" });
     campaign.status = "paused";
-    res.json(await saveCampaign(campaign));
+    campaign.pausedAt = new Date().toISOString();
+    res.json(await saveCampaign(ensureCampaignShape(campaign)));
   });
 
   app.get("/api/analytics", async (req, res) => {

@@ -105,17 +105,16 @@ export default function Docs() {
         <section id="inbound" className="docs-section">
           <h3>Inbound calls</h3>
           <p>
-            <Link to="/inbound">Inbound calls</Link> assigns one agent to the Twilio number. Turn <b>Answer live calls</b> on and save.
-            Dial the number from another phone. The transcript appears on that page and in call logs.
-            Edit greeting, voice, and instructions in the studio — inbound uses the saved agent, not a separate script.
+            <Link to="/inbound">Inbound calls</Link> lists deployments like Sarvam: name, status, app ID, phone, created time.
+            Open one to see identity, agent, connection, schedule, and recent calls. Resume to answer on that number; pause to stop.
           </p>
         </section>
 
         <section id="outbound" className="docs-section">
           <h3>Outbound campaigns</h3>
           <p>
-            On <Link to="/campaigns">Outbound campaigns</Link>, create a campaign, pick an agent, paste CSV <code>name,phone,notes</code>,
-            then launch. Each row becomes a call. Missed calls go to the recall queue. Pause from the campaign page if you need to stop dialing.
+            On <Link to="/campaigns">Outbound campaigns</Link>, create a campaign, add cohorts (CSV), then resume from Actions.
+            The list shows call volume, active vs past campaigns, agent type, and status. Detail has audience size, pickup/completion, retry attempts, and schedules. DND numbers are skipped on launch.
           </p>
         </section>
 

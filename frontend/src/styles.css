@@ -195,6 +195,8 @@ h3 {
 .content {
   padding: 32px 40px 80px;
   min-width: 0;
+  overflow-y: auto;
+  max-height: 100vh;
 }
 
 .page > * {
@@ -349,6 +351,13 @@ article.card:hover,
   color: var(--red);
   background: rgba(227, 28, 35, 0.08);
   border-color: rgba(227, 28, 35, 0.14);
+}
+
+.badge.paused {
+  color: #b45309;
+  background: rgba(245, 158, 11, 0.14);
+  border-color: rgba(180, 83, 9, 0.18);
+  text-transform: capitalize;
 }
 
 .badge .dot {
@@ -1957,6 +1966,103 @@ code {
   padding: 10px 8px;
   white-space: nowrap;
 }
+
+.deploy-card { padding: 16px 20px 20px; }
+.deploy-metric {
+  display: grid;
+  gap: 4px;
+  margin: 4px 0 12px;
+}
+.deploy-metric strong {
+  font-size: 44px;
+  letter-spacing: -0.06em;
+  line-height: 1;
+}
+.pill-tabs {
+  display: flex;
+  gap: 6px;
+}
+.pill-tabs button {
+  border: 0;
+  background: transparent;
+  font-weight: 700;
+  color: var(--muted);
+  cursor: pointer;
+  padding: 6px 4px;
+}
+.pill-tabs button.on { color: var(--text); }
+.chart-legend {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 14px;
+  margin: 0 0 10px;
+  color: var(--muted);
+  font-size: 13px;
+}
+.chart-legend i {
+  display: inline-block;
+  width: 8px;
+  height: 8px;
+  border-radius: 99px;
+  margin-right: 6px;
+}
+.bar-chart { width: 100%; height: auto; }
+.menu-wrap { position: relative; }
+.menu-card {
+  position: absolute;
+  right: 0;
+  top: calc(100% + 6px);
+  z-index: 8;
+  min-width: 160px;
+  background: #fff;
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  box-shadow: var(--shadow);
+  display: grid;
+  padding: 6px;
+}
+.menu-card button,
+.menu-card a {
+  text-align: left;
+  border: 0;
+  background: none;
+  padding: 8px 10px;
+  border-radius: 8px;
+  cursor: pointer;
+  font-weight: 600;
+}
+.menu-card button:hover,
+.menu-card a:hover { background: var(--panel-2); }
+.id-grid,
+.config-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+  gap: 18px;
+  padding: 8px 0 12px;
+}
+.id-grid > div,
+.config-grid > div {
+  display: grid;
+  gap: 6px;
+  align-content: start;
+}
+.copy-id {
+  display: block;
+  border: 0;
+  background: none;
+  padding: 0;
+  cursor: pointer;
+  font-family: var(--mono);
+  font-size: 13px;
+}
+.retry-grid {
+  display: grid;
+  grid-template-columns: repeat(2, 1fr);
+  gap: 10px;
+  margin-top: 12px;
+}
+details.product-sheet > summary { list-style: none; }
+details.product-sheet > summary::-webkit-details-marker { display: none; }
 
 @media (max-width: 1100px) {
   .kpi-strip { grid-template-columns: repeat(3, minmax(0, 1fr)); }

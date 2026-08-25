@@ -8,11 +8,11 @@ function dayKey(value) {
   return date.toLocaleDateString("en-CA", { timeZone: "Asia/Kolkata" });
 }
 
-function callTime(call) {
+export function callTime(call) {
   return call.startedAt || call.createdAt || call.updatedAt;
 }
 
-function durationSeconds(call) {
+export function durationSeconds(call) {
   if (Number(call.durationSeconds) > 0) return Number(call.durationSeconds);
   if (call.startedAt && call.endedAt) {
     return Math.max(0, Math.round((Date.parse(call.endedAt) - Date.parse(call.startedAt)) / 1000));
@@ -20,7 +20,7 @@ function durationSeconds(call) {
   return 0;
 }
 
-function isConnected(call) {
+export function isConnected(call) {
   if (["no_answer", "busy", "failed", "voicemail"].includes(call.status)) return false;
   if (["no_answer", "busy", "failed", "voicemail"].includes(call.disposition)) return false;
   if (CONNECTED.has(call.status) || CONNECTED.has(call.disposition)) return true;
@@ -58,7 +58,7 @@ function average(values) {
   return nums.reduce((sum, value) => sum + value, 0) / nums.length;
 }
 
-function outcomeBucket(call) {
+export function outcomeBucket(call) {
   if (["busy"].includes(call.status) || call.disposition === "busy") return "Busy";
   if (["no_answer"].includes(call.status) || call.disposition === "no_answer") return "No answer";
   if (["voicemail"].includes(call.status) || call.disposition === "voicemail") return "Voicemail";
@@ -216,5 +216,76 @@ export function buildAnalytics({ calls, agents, campaigns, from, to, agentId, ca
     agents: agents.map((agent) => ({ id: agent.id, name: agent.name })),
     campaigns: campaigns.map((campaign) => ({ id: campaign.id, name: campaign.name })),
     logs,
+  };
+}
+
+function hourLabel(date) {
+  return date.toLocaleTimeString("en-IN", {
+    hour: "2-digit",
+    minute: "2-digit",
+    hour12: false,
+    timeZone: "Asia/Kolkata",
+  });
+}
+
+export function activityBucket(call) {
+  const outcome = outcomeBucket(call);
+  if (outcome === "Answered") return "connected";
+  if (outcome === "No answer") return "no_answer";
+  if (outcome === "Busy") return "busy";
+  if (outcome === "Failed") return "failed";
+  return "other";
+}
+
+export function timeSeries(calls, { hours = 24, grainMinutes = 60 } = {}) {
+  const end = Date.now();
+  const start = end - hours * 3600000;
+  let step = Math.max(1, grainMinutes) * 60000;
+  const maxBuckets = 48;
+  if ((end - start) / step > maxBuckets) {
+    step = Math.ceil((end - start) / maxBuckets / 60000) * 60000;
+  }
+  const buckets = [];
+  for (let t = start; t < end; t += step) {
+    buckets.push({
+      at: new Date(t).toISOString(),
+      label: hourLabel(new Date(t)),
+      connected: 0,
+      no_answer: 0,
+      busy: 0,
+      failed: 0,
+      other: 0,
+      total: 0,
+      live: 0,
+    });
+  }
+  for (const call of calls) {
+    const time = Date.parse(callTime(call) || 0);
+    if (!time || time < start || time > end) continue;
+    const index = Math.min(buckets.length - 1, Math.floor((time - start) / step));
+    const key = activityBucket(call);
+    if (buckets[index][key] != null) buckets[index][key] += 1;
+    buckets[index].total += 1;
+    if (["queued", "ringing", "in_progress"].includes(call.status)) buckets[index].live += 1;
+  }
+  return buckets;
+}
+
+export function campaignMetrics(campaign, calls = []) {
+  const contacts = campaign.contacts || [];
+  const audienceSize = contacts.length;
+  const attempted = calls.length;
+  const connected = calls.filter(isConnected).length;
+  const completed = calls.filter((call) =>
+    ["completed", "success", "qualified", "booked"].includes(call.disposition) ||
+    call.status === "completed"
+  ).length;
+  return {
+    audienceSize,
+    attempted,
+    connected,
+    completed,
+    completionRate: audienceSize ? Math.round((completed / audienceSize) * 100) : 0,
+    pickupRate: attempted ? Math.round((connected / attempted) * 100) : 0,
   };
 }

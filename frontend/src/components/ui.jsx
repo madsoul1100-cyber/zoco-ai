@@ -1,12 +1,15 @@
 import { useEffect, useRef } from "react";
 
+function badgeKind(value) {
+  if (["success", "qualified", "booked", "completed", "live", "running", "synced"].includes(value)) return "done";
+  if (["in_progress", "ringing", "queued", "launching"].includes(value)) return "live";
+  if (["paused", "draft", "past"].includes(value)) return "paused";
+  return "recall";
+}
+
 export function StatusBadge({ status, disposition }) {
   const value = disposition || status || "unknown";
-  const kind = ["success", "qualified", "booked", "completed"].includes(value)
-    ? "done"
-    : ["in_progress", "ringing", "queued"].includes(value)
-      ? "live"
-      : "recall";
+  const kind = badgeKind(String(value));
   return (
     <span className={`badge ${kind}`}>
       <span className="dot" />
@@ -39,6 +42,19 @@ export function relativeTime(value) {
   const day = Math.round(hr / 24);
   if (day < 14) return `${day}d ago`;
   return when(value);
+}
+
+export function aboutTime(value) {
+  if (!value) return "—";
+  const ms = Date.now() - new Date(value).getTime();
+  if (Number.isNaN(ms)) return "—";
+  const min = Math.max(0, Math.round(ms / 60000));
+  if (min < 1) return "just now";
+  if (min < 60) return `about ${min} minute${min === 1 ? "" : "s"} ago`;
+  const hr = Math.round(min / 60);
+  if (hr < 24) return `about ${hr} hour${hr === 1 ? "" : "s"} ago`;
+  const day = Math.round(hr / 24);
+  return `about ${day} day${day === 1 ? "" : "s"} ago`;
 }
 
 const AVATAR_TONES = [

@@ -1,58 +1,56 @@
-import { useEffect, useState } from "react";
-import { useNavigate } from "react-router-dom";
+import { useEffect, useMemo, useState } from "react";
+import { Link, useNavigate } from "react-router-dom";
 import { api } from "../api.js";
-import { AvatarMark, EmptyState, Modal, PageHeader, StatusBadge, relativeTime } from "../components/ui.jsx";
+import { StackedBars } from "../components/BarChart.jsx";
+import { AvatarMark, EmptyState, Modal, PageHeader, StatusBadge, aboutTime } from "../components/ui.jsx";
+import { parseCsv } from "../lib/csv.js";
 
-function parseCsv(text) {
-  return String(text || "")
-    .split(/\r?\n/)
-    .map((line) => line.trim())
-    .filter(Boolean)
-    .map((line) => {
-      const [name, phone, notes] = line.split(",").map((part) => part.trim());
-      if (!phone && name) return { name: "Customer", phone: name, notes: "" };
-      return { name: name || "Customer", phone, notes: notes || "" };
-    })
-    .filter((row) => row.phone);
-}
+const PAST = new Set(["completed", "ended", "archived"]);
 
 export default function Campaigns() {
   const navigate = useNavigate();
   const [agents, setAgents] = useState([]);
-  const [campaigns, setCampaigns] = useState([]);
+  const [overview, setOverview] = useState(null);
   const [form, setForm] = useState({ name: "", agentId: "", csv: "" });
   const [error, setError] = useState("");
   const [open, setOpen] = useState(false);
   const [query, setQuery] = useState("");
+  const [status, setStatus] = useState("all");
+  const [tab, setTab] = useState("active");
+  const [metric, setMetric] = useState("calls");
+  const [hours, setHours] = useState(24);
   const [busy, setBusy] = useState(false);
   const [ready, setReady] = useState(false);
 
-  async function refresh() {
-    const [agentList, list] = await Promise.all([api.agents(), api.campaigns()]);
+  async function refresh(nextHours = hours) {
+    const [agentList, data] = await Promise.all([api.agents(), api.campaignOverview(nextHours)]);
     setAgents(agentList);
-    setCampaigns(list);
+    setOverview(data);
     setForm((current) => ({ ...current, agentId: current.agentId || agentList[0]?.id || "" }));
     setReady(true);
   }
 
   useEffect(() => {
-    refresh().catch((err) => setError(err.message));
+    refresh().catch((err) => {
+      setError(err.message);
+      setReady(true);
+    });
   }, []);
+
+  useEffect(() => {
+    if (!ready) return;
+    api.campaignOverview(hours).then(setOverview).catch((err) => setError(err.message));
+  }, [hours, ready]);
 
   async function create(event) {
     event.preventDefault();
     setError("");
-    const contacts = parseCsv(form.csv);
-    if (!contacts.length) {
-      setError("Paste a list: name,phone,notes — one customer per line.");
-      return;
-    }
     setBusy(true);
     try {
       const campaign = await api.createCampaign({
         name: form.name,
         agentId: form.agentId,
-        contacts,
+        contacts: parseCsv(form.csv),
       });
       setOpen(false);
       navigate(`/campaigns/${campaign.id}`);
@@ -63,78 +61,120 @@ export default function Campaigns() {
     }
   }
 
-  const visible = campaigns.filter((campaign) =>
-    `${campaign.name} ${campaign.agentName || ""}`.toLowerCase().includes(query.toLowerCase())
+  const campaigns = overview?.campaigns || [];
+  const active = campaigns.filter((campaign) => !PAST.has(campaign.status));
+  const past = campaigns.filter((campaign) => PAST.has(campaign.status));
+  const pool = tab === "past" ? past : active;
+  const visible = pool.filter((campaign) => {
+    const text = `${campaign.name} ${campaign.agentName || ""}`.toLowerCase();
+    if (query && !text.includes(query.toLowerCase())) return false;
+    if (status !== "all" && campaign.status !== status) return false;
+    return true;
+  });
+  const points = metric === "concurrency" ? overview?.concurrency || [] : overview?.activity || [];
+
+  const statuses = useMemo(
+    () => [...new Set(pool.map((campaign) => campaign.status).filter(Boolean))],
+    [pool]
   );
 
   return (
     <>
       <PageHeader
         title="Outbound campaigns"
-        subtitle="Upload a list, pick an agent, then launch. Missed calls go to the recall queue automatically."
         actions={
-          <button className="btn" type="button" onClick={() => setOpen(true)} disabled={!agents.length}>
-            + Create campaign
-          </button>
+          <>
+            <Link className="link-quiet" to="/campaigns/dnd">DND list</Link>
+            <button className="btn" type="button" onClick={() => setOpen(true)} disabled={!agents.length}>
+              + Create campaign
+            </button>
+          </>
         }
       />
       {error && !open ? <p className="error">{error}</p> : null}
 
       {!ready ? (
         <p className="muted">Loading campaigns…</p>
-      ) : campaigns.length === 0 ? (
-        <EmptyState
-          title="No campaigns yet"
-          body={agents.length
-            ? "Create a campaign, paste contacts, and launch. Each row becomes a live outbound call."
-            : "Create an outbound agent first, then come back to launch a list."}
-          action={
-            agents.length ? (
-              <button className="btn" type="button" onClick={() => setOpen(true)}>+ Create campaign</button>
-            ) : (
-              <button className="btn" type="button" onClick={() => navigate("/agents")}>Create an agent</button>
-            )
-          }
-        />
       ) : (
-        <section className="product-sheet">
-          <div className="sheet-toolbar">
-            <h3>Campaigns</h3>
-            <input
-              className="input search-input"
-              value={query}
-              onChange={(e) => setQuery(e.target.value)}
-              placeholder="Search"
-            />
-          </div>
-          <table className="recents-table">
-            <thead>
-              <tr>
-                <th>Campaign</th>
-                <th>Agent</th>
-                <th>Contacts</th>
-                <th>Status</th>
-                <th>Updated</th>
-              </tr>
-            </thead>
-            <tbody>
-              {visible.map((campaign) => (
-                <tr key={campaign.id} className="clickable" onClick={() => navigate(`/campaigns/${campaign.id}`)}>
-                  <td>
-                    <div className="entity-cell">
-                      <AvatarMark name={campaign.name} />
-                      <strong>{campaign.name}</strong>
-                    </div>
-                  </td>
-                  <td>{campaign.agentName}</td>
-                  <td>{campaign.contacts?.length || 0}</td>
-                  <td><StatusBadge status={campaign.status} /></td>
-                  <td className="muted">{relativeTime(campaign.updatedAt || campaign.createdAt)}</td>
-                </tr>
-              ))}
-            </tbody>
-          </table>
-        </section>
+        <>
+          <section className="product-sheet deploy-card">
+            <div className="sheet-toolbar">
+              <div className="pill-tabs">
+                <button type="button" className={metric === "calls" ? "on" : ""} onClick={() => setMetric("calls")}>Calls</button>
+                <button type="button" className={metric === "concurrency" ? "on" : ""} onClick={() => setMetric("concurrency")}>Concurrency</button>
+              </div>
+              <div className="unit-toggle">
+                <button type="button" className={hours === 12 ? "on" : ""} onClick={() => setHours(12)}>12h</button>
+                <button type="button" className={hours === 24 ? "on" : ""} onClick={() => setHours(24)}>24h</button>
+              </div>
+            </div>
+            <div className="deploy-metric">
+              <strong>{metric === "calls" ? overview?.total || 0 : Math.max(0, ...points.map((point) => point.live || 0))}</strong>
+              <span className="muted">{metric === "calls" ? "Number of calls" : "Live concurrency"}</span>
+            </div>
+            <StackedBars points={points} keys={metric === "calls" ? ["total"] : ["live"]} />
+          </section>
+
+          <section className="product-sheet" style={{ marginTop: 16 }}>
+            <div className="dash-tabs" style={{ marginBottom: 8 }}>
+              <button type="button" className={tab === "active" ? "on" : ""} onClick={() => setTab("active")}>Active campaigns</button>
+              <button type="button" className={tab === "past" ? "on" : ""} onClick={() => setTab("past")}>Past campaigns</button>
+            </div>
+            <div className="filter-bar">
+              <input className="input search-input" value={query} onChange={(e) => setQuery(e.target.value)} placeholder="Search active campaigns" />
+              <select className="input filter-input" value={status} onChange={(e) => setStatus(e.target.value)}>
+                <option value="all">All statuses</option>
+                {statuses.map((item) => (
+                  <option key={item} value={item}>{item.replaceAll("_", " ")}</option>
+                ))}
+              </select>
+              <span className="chip on">All time</span>
+            </div>
+            {campaigns.length === 0 ? (
+              <EmptyState
+                title="No campaigns yet"
+                body={agents.length ? "Create a campaign, add a cohort, then launch." : "Create an outbound agent first."}
+                action={
+                  agents.length
+                    ? <button className="btn" type="button" onClick={() => setOpen(true)}>+ Create campaign</button>
+                    : <button className="btn" type="button" onClick={() => navigate("/agents")}>Create an agent</button>
+                }
+              />
+            ) : (
+              <table className="recents-table">
+                <thead>
+                  <tr>
+                    <th>Name</th>
+                    <th>Agent type</th>
+                    <th>Status</th>
+                    <th>When</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {visible.map((campaign) => (
+                    <tr key={campaign.id} className="clickable" onClick={() => navigate(`/campaigns/${campaign.id}`)}>
+                      <td>
+                        <div className="entity-cell">
+                          <AvatarMark name={campaign.name} />
+                          <strong>{campaign.name}</strong>
+                        </div>
+                      </td>
+                      <td>
+                        <div className="entity-cell">
+                          <AvatarMark name={campaign.agentName} />
+                          {campaign.agentName}
+                        </div>
+                      </td>
+                      <td><StatusBadge status={campaign.status} /></td>
+                      <td className="muted">{aboutTime(campaign.updatedAt || campaign.pausedAt || campaign.createdAt)}</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            )}
+            {visible.length === 0 && campaigns.length ? <p className="muted sheet-empty">No campaigns match these filters.</p> : null}
+          </section>
+        </>
       )}
 
       <Modal
@@ -154,13 +194,7 @@ export default function Campaigns() {
         <form id="create-campaign" className="grid" onSubmit={create}>
           <label>
             Campaign name
-            <input
-              className="input"
-              value={form.name}
-              onChange={(e) => setForm({ ...form, name: e.target.value })}
-              placeholder="August EMI reminders"
-              required
-            />
+            <input className="input" value={form.name} onChange={(e) => setForm({ ...form, name: e.target.value })} placeholder="Priya - outbound test" required />
           </label>
           <label>
             Agent
@@ -171,13 +205,8 @@ export default function Campaigns() {
             </select>
           </label>
           <label>
-            Contact list (CSV)
-            <textarea
-              value={form.csv}
-              onChange={(e) => setForm({ ...form, csv: e.target.value })}
-              placeholder={"Riya Shah,+919876543210,EMI due 21 Aug\nArjun Mehta,8888111222,follow up"}
-              required
-            />
+            First cohort (CSV, optional)
+            <textarea value={form.csv} onChange={(e) => setForm({ ...form, csv: e.target.value })} placeholder={"Riya Shah,+919876543210,notes"} />
           </label>
         </form>
       </Modal>
