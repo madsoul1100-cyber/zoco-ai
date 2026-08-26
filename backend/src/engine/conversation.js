@@ -63,6 +63,7 @@ function workflowInstruction(agent) {
 function languageInstruction(agent) {
   const lang = getLanguage(agent?.language);
   const gender = speakerGender(agent);
+  const rich = Array.isArray(agent?.instructionSections) && agent.instructionSections.length > 0;
   const gendered = lang.code === "en-IN"
     ? ""
     : gender === "male"
@@ -72,6 +73,15 @@ function languageInstruction(agent) {
   const numbers = settings.indicNumbers
     ? "Speak numbers in Indic words in Hindi and other Indian languages. Example: 500 as paanch sau, not five hundred."
     : "";
+  if (rich) {
+    return [
+      "Reply with spoken words only for the caller. No markdown, bullets, emojis, citations, URLs or JSON.",
+      "Follow the Instructions below exactly for length, questions, punctuation and endings. They override any shorter default style.",
+      "If the customer asks to talk in English, Hindi, or another allowed language, switch immediately and stay there until they switch again.",
+      gendered,
+      numbers,
+    ].filter(Boolean).join(" ");
+  }
   return [
     "Reply with spoken words only. No lists, markdown, emojis, question marks, or exclamation marks.",
     "Indian TTS voices read ? and ! out loud as 'question mark' and 'exclamation point'. Never write those characters.",
@@ -92,14 +102,22 @@ function languageLock(agent) {
 }
 
 export function buildModelMessages({ agent, history, userText, slots, knowledge }) {
+  const rich = Array.isArray(agent?.instructionSections) && agent.instructionSections.length > 0;
+  const compiled = compiledAgentInstructions(agent);
   const system = [
-    `You are ${agent.name}, on a live phone call for Zoco. The other person is the customer, not you.`,
-    `You work for the business in the use case. You are calling the customer about that service — for example a travel desk confirming a flight.`,
-    `Sound like a real agency person, not a generic assistant. One or two short sentences. Never more than 25 words.`,
+    `You are ${agent.name}, on a live phone call.`,
+    rich
+      ? `Stay in character for this agent. Obey the Instructions section as the source of truth for role, flow, language, tools and endings.
+Hard speech rules from the Instructions (never break these):
+- Never say ధన్యవాదాలు. Use English "Thank you" only for genuine thanks, never for giving a name/district/year.
+- Always speak the English words "Form 18". Never say ఫారం, ఫార్మ్ or ఫార్మే.
+- Default to one short spoken sentence; two only when needed before one question.
+- On refusal / not interested / wrong person / opt-out: speak the required closing line then end.`
+      : `You work for the business in the use case. Sound like a real agency person, not a generic assistant. One or two short sentences. Never more than 25 words.`,
     languageInstruction(agent),
-    `Use case: ${agent.useCase}. Goal: ${agent.successCriteria}. The goal is what you work toward, not a reason to hang up on the first turn.`,
-    compiledAgentInstructions(agent)
-      ? `Instructions:\n${compiledAgentInstructions(agent)}`
+    `Use case: ${agent.useCase}. Goal: ${agent.successCriteria}.`,
+    compiled
+      ? `Instructions:\n${compiled}`
       : agent.persona
         ? `Persona: ${agent.persona}`
         : "",
@@ -113,14 +131,16 @@ export function buildModelMessages({ agent, history, userText, slots, knowledge 
     knowledge ? `Use this knowledge base only when the customer asks something factual. Never read it out as a list. Knowledge:\n${knowledge}` : "",
     slots && Object.keys(slots).length ? `Known details: ${JSON.stringify(slots)}` : "",
     `Reply with spoken words only.`,
-    `If and only if the call should end after a real outcome, add a tag at the very end: [END:qualified], [END:success], [END:callback_requested], or [END:not_interested].`,
+    rich
+      ? `When the Instructions say to end the call, speak the required closing line first, then add [END:not_interested], [END:success], [END:callback_requested], or [END:do_not_call] as appropriate.`
+      : `If and only if the call should end after a real outcome, add a tag at the very end: [END:qualified], [END:success], [END:callback_requested], or [END:not_interested].`,
   ]
     .filter(Boolean)
-    .join(" ");
+    .join("\n\n");
 
   const prior = (history || [])
     .filter((m) => m.role === "user" || m.role === "assistant")
-    .slice(-8)
+    .slice(-12)
     .map((m) => ({ role: m.role, content: m.text }));
 
   const last = prior.at(-1);
@@ -128,7 +148,15 @@ export function buildModelMessages({ agent, history, userText, slots, knowledge 
   if (!last || last.role !== "user" || last.content !== userText) {
     messages.push({ role: "user", content: userText });
   }
-  messages.push({ role: "system", content: languageLock(agent) });
+  if (!rich) {
+    messages.push({ role: "system", content: languageLock(agent) });
+  } else {
+    const lang = getLanguage(agent?.language);
+    messages.push({
+      role: "system",
+      content: `For this turn stay primarily in ${lang.label} (${lang.native}) unless the caller clearly switched language. Keep [END:...] tags in ASCII. Prefer the Instructions over any generic brevity rule.`,
+    });
+  }
   return messages;
 }
 
@@ -141,7 +169,7 @@ export function parseSpoken(content) {
     try {
       const parsed = JSON.parse(raw);
       return {
-        text: String(parsed.text || "").trim(),
+        text: sanitizeSpoken(String(parsed.text || "").trim()),
         endCall: Boolean(parsed.endCall || end),
         disposition: parsed.disposition || end?.[1]?.toLowerCase() || null,
       };
@@ -150,10 +178,20 @@ export function parseSpoken(content) {
     }
   }
   return {
-    text: raw,
+    text: sanitizeSpoken(raw),
     endCall: Boolean(end),
     disposition: end?.[1]?.toLowerCase() || null,
   };
+}
+
+function sanitizeSpoken(text) {
+  return String(text || "")
+    .replace(/ధన్యవాదాలు\.?/g, "")
+    .replace(/అప్లికేషన్\s*ఫారం|అప్లికేషన్\s*ఫార్మ్|ఫార్మే|ఫార్మ్|ఫారం/g, "Form 18")
+    .replace(/\bForm\s*18\s*Form\s*18\b/gi, "Form 18")
+    .replace(/[ \t]{2,}/g, " ")
+    .replace(/\s+([,.;])/g, "$1")
+    .trim();
 }
 
 export function guardEarlyHangup(parsed, call) {
@@ -296,16 +334,36 @@ async function completeWithTools({ agent, call, history, userText, slots, llm, k
   if (forcedEnd) {
     parsed.endCall = true;
     parsed.disposition = forcedEnd;
+    if (!parsed.text) {
+      parsed.text = extra || defaultEndLine(forcedEnd, agent);
+    }
   }
   if (transfer) parsed.transfer = transfer;
   return parsed;
+}
+
+function defaultEndLine(disposition, agent) {
+  const lang = getLanguage(agent?.language).code;
+  if (lang === "te-IN") {
+    if (disposition === "do_not_call") return "సరే, మళ్లీ call చేయవద్దన్న మీ request నమోదు చేస్తున్నాను.";
+    if (disposition === "callback_requested") return "సరే, మీరు చెప్పిన time note చేశాను.";
+    return "సరే అండి.";
+  }
+  if (lang === "hi-IN") {
+    if (disposition === "do_not_call") return "ठीक है, दोबारा कॉल नहीं करेंगे।";
+    return "ठीक है।";
+  }
+  if (disposition === "do_not_call") return "Okay, I will note not to call again.";
+  return "Okay.";
 }
 
 async function chatCompletion(llm, { agent, messages, tools, stream }) {
   const payload = {
     model: llm.model,
     temperature: Number(agent?.callSettings?.temperature ?? 0.35),
-    max_tokens: getLanguage(agent?.language).code === "en-IN" ? 90 : 140,
+    max_tokens: Array.isArray(agent?.instructionSections) && agent.instructionSections.length
+      ? 220
+      : getLanguage(agent?.language).code === "en-IN" ? 90 : 140,
     stream: Boolean(stream),
     messages,
   };

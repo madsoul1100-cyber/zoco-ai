@@ -5,12 +5,20 @@ export function templateVars(agent, customer = {}) {
     if (!key) continue;
     extras[key] = item.defaultValue || item.value || item.example || "";
   }
+  const fromCustomer = {
+    ...(customer || {}),
+  };
+  // Prefer campaign / input defaults when the studio uses a placeholder name.
+  const placeholder = /^(test customer|guest|caller)$/i.test(String(fromCustomer.name || "").trim());
   return {
     agent_name: agent?.name || "",
     language: agent?.language || "",
-    customer_name: customer.name || customer.customer_name || extras.customer_name || "",
-    phone: customer.phone || extras.phone || "",
+    phone: fromCustomer.phone || extras.phone || "",
     ...extras,
+    ...fromCustomer,
+    customer_name: placeholder
+      ? (extras.customer_name || fromCustomer.customer_name || fromCustomer.name || "")
+      : (fromCustomer.customer_name || fromCustomer.name || extras.customer_name || ""),
   };
 }
 

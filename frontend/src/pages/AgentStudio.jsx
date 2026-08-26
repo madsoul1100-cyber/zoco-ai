@@ -255,11 +255,19 @@ export default function AgentStudio() {
     modeRef.current = channel;
     wantListenRef.current = false;
     stopListening();
+    const defaults = Object.fromEntries(
+      (agent?.inputVariables || []).filter((item) => item?.key).map((item) => [item.key, item.defaultValue || ""])
+    );
     const next = await api.startCall({
       agentId: id,
       channel,
       language: agent?.language,
-      customer: { name: "Test customer", phone: "+910000000000" },
+      customer: {
+        name: defaults.customer_name || defaults.caller_name || "Test customer",
+        phone: "+910000000000",
+        ...defaults,
+      },
+      variables: defaults,
     });
     callRef.current = next;
     setCall(next);

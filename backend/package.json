@@ -6,7 +6,8 @@
   "scripts": {
     "dev": "node --watch-path=src src/server.js",
     "start": "node src/server.js",
-    "seed": "node src/seed.js"
+    "seed": "node src/seed.js",
+    "seed:priya": "node scripts/seedPriyaMlc.js"
   },
   "dependencies": {
     "@aws-sdk/client-s3": "^3.864.0",

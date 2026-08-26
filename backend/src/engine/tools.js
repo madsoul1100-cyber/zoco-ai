@@ -35,10 +35,15 @@ export function openAiTools(agent) {
       type: "function",
       function: {
         name: "end_interaction",
-        description: "Hang up after a short spoken goodbye when the conversation is finished.",
+        description:
+          "End the call only after speaking the required closing line from the Instructions (for example సరే అండి). Always pass goodbye with that exact spoken line, then disposition.",
         parameters: {
           type: "object",
-          properties: { disposition: { type: "string" }, goodbye: { type: "string" } },
+          properties: {
+            disposition: { type: "string", description: "not_interested | do_not_call | success | callback_requested | wrong_person" },
+            goodbye: { type: "string", description: "The exact short closing line spoken to the caller before hangup" },
+          },
+          required: ["goodbye", "disposition"],
         },
       },
     },
@@ -82,7 +87,14 @@ export async function runToolCall({ name, args, agent, call, slots, knowledgeFn 
     return { ok: true, result: text || "No matching knowledge." };
   }
   if (name === "end_interaction") {
-    return { ok: true, endCall: true, disposition: args.disposition || "success", say: args.goodbye || "" };
+    const goodbye = String(args.goodbye || args.message || args.closing || "").trim();
+    return {
+      ok: true,
+      endCall: true,
+      disposition: args.disposition || "not_interested",
+      say: goodbye,
+      result: goodbye ? `Ended with: ${goodbye}` : "End the call after speaking the required closing line.",
+    };
   }
   if (name === "transfer_to_human") {
     const number = normalizePhone(args.number || agent.transferNumber || "");
