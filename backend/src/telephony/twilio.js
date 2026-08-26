@@ -243,9 +243,10 @@ function sayVoice(language = "en-IN") {
   return { language: lang.sayLanguage, voice: lang.sayVoice };
 }
 
-export function gatherTwiml({ say, actionUrl, language = "en-IN", audioUrl, recordingCallbackUrl }) {
+export function gatherTwiml({ say, actionUrl, language = "en-IN", audioUrl, recordingCallbackUrl, silenceTimeout = 6 }) {
   const lang = getLanguage(language);
   const voice = sayVoice(language);
+  const timeout = Math.min(20, Math.max(3, Number(silenceTimeout) || 6));
   const prompt = audioUrl
     ? `<Play>${xmlEscape(audioUrl)}</Play>`
     : `<Say language="${voice.language}" voice="${voice.voice}">${xmlEscape(spokenForTts(say))}</Say>`;
@@ -255,15 +256,16 @@ export function gatherTwiml({ say, actionUrl, language = "en-IN", audioUrl, reco
   return `<?xml version="1.0" encoding="UTF-8"?>
 <Response>
   ${start}
-  <Gather input="speech" timeout="6" speechTimeout="auto" language="${xmlEscape(lang.gather)}" action="${xmlEscape(actionUrl)}" method="POST">
+  <Gather input="speech" timeout="${timeout}" speechTimeout="auto" language="${xmlEscape(lang.gather)}" action="${xmlEscape(actionUrl)}" method="POST">
     ${prompt}
   </Gather>
   <Redirect method="POST">${xmlEscape(actionUrl)}</Redirect>
 </Response>`;
 }
 
-export function recordListenTwiml({ say, actionUrl, language = "en-IN", audioUrl, recordingCallbackUrl }) {
+export function recordListenTwiml({ say, actionUrl, language = "en-IN", audioUrl, recordingCallbackUrl, silenceTimeout = 6 }) {
   const voice = sayVoice(language);
+  const timeout = Math.min(10, Math.max(2, Number(silenceTimeout) || 6));
   const prompt = audioUrl
     ? `<Play>${xmlEscape(audioUrl)}</Play>`
     : `<Say language="${voice.language}" voice="${voice.voice}">${xmlEscape(spokenForTts(say))}</Say>`;
@@ -274,7 +276,7 @@ export function recordListenTwiml({ say, actionUrl, language = "en-IN", audioUrl
 <Response>
   ${start}
   ${prompt}
-  <Record action="${xmlEscape(actionUrl)}" method="POST" maxLength="8" timeout="2" playBeep="false" transcribe="false" />
+  <Record action="${xmlEscape(actionUrl)}" method="POST" maxLength="12" timeout="${timeout}" playBeep="false" transcribe="false" />
 </Response>`;
 }
 
@@ -309,7 +311,7 @@ export function hangupTwiml({ say, language = "en-IN", audioUrl }) {
 </Response>`;
 }
 
-export async function placeTwilioCall({ call, tel }) {
+export async function placeTwilioCall({ call, tel, detectVoicemail = false }) {
   const to = normalizePhone(call.customer?.phone);
   if (!to) throw new Error("Customer phone is missing");
   const voiceUrl = `${tel.publicBaseUrl}/webhooks/twilio/voice?callId=${encodeURIComponent(call.id)}`;
@@ -319,10 +321,18 @@ export async function placeTwilioCall({ call, tel }) {
     From: tel.fromNumber,
     Url: voiceUrl,
     Method: "POST",
+    StatusCallback: statusUrl,
+    StatusCallbackMethod: "POST",
     RecordingStatusCallback: `${tel.publicBaseUrl}/webhooks/twilio/recording?callId=${encodeURIComponent(call.id)}`,
     RecordingStatusCallbackMethod: "POST",
     Record: "true",
   });
+  if (detectVoicemail) {
+    body.set("MachineDetection", "Enable");
+    body.set("AsyncAmd", "true");
+    body.set("AsyncAmdStatusCallback", `${tel.publicBaseUrl}/webhooks/twilio/amd?callId=${encodeURIComponent(call.id)}`);
+    body.set("AsyncAmdStatusCallbackMethod", "POST");
+  }
   const response = await fetch(`https://api.twilio.com/2010-04-01/Accounts/${tel.accountSid}/Calls.json`, {
     method: "POST",
     headers: {
@@ -337,6 +347,15 @@ export async function placeTwilioCall({ call, tel }) {
     throw new Error(detail);
   }
   return data;
+}
+
+export async function redirectTwilioCall({ tel, callSid, url }) {
+  if (!tel?.accountSid || !tel?.authToken || !callSid || !url) return null;
+  return twilioJson(`https://api.twilio.com/2010-04-01/Accounts/${tel.accountSid}/Calls/${callSid}.json`, {
+    tel,
+    method: "POST",
+    body: new URLSearchParams({ Url: url, Method: "POST" }),
+  });
 }
 
 export function mapTwilioStatus(status) {

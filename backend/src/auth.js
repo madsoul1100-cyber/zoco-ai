@@ -367,6 +367,7 @@ const OPEN = [
   /^\/embed/,
   /^\/api\/stt$/,
   /^\/api\/tts/,
+  /^\/api\/ambient\//,
   /^\/api\/health/,
   /^\/api\/calls\/[^/]+\/messages/,
 ];

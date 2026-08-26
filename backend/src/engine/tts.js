@@ -4,6 +4,8 @@ import path from "node:path";
 import { llmHeaders, resolveTtsConfig, sarvamTtsLanguage } from "./providers.js";
 import { spokenForTts } from "../languages.js";
 import { DATA_DIR } from "../store.js";
+import { ambientEnabled, ambientVolume, mixAmbientIntoSpeech } from "./ambient.js";
+import { applyPronunciations, ensureSarvamDictId, pronunciationCount } from "./pronunciation.js";
 
 const TTS_DIR = path.join(DATA_DIR, "tts");
 
@@ -50,7 +52,7 @@ function isSarvamV2(model) {
   return String(model || "").includes("v2") && !String(model || "").includes("v3");
 }
 
-async function synthesizeSarvam({ text, language, voice, model, apiKey, pace = 1, pitch = 0 }) {
+async function synthesizeSarvam({ text, language, voice, model, apiKey, pace = 1, pitch = 0, dictId = "" }) {
   const payload = {
     text,
     target_language_code: sarvamTtsLanguage(language),
@@ -59,6 +61,7 @@ async function synthesizeSarvam({ text, language, voice, model, apiKey, pace = 1
     pace: Math.min(2, Math.max(0.5, Number(pace) || 1)),
   };
   if (isSarvamV2(payload.model)) payload.pitch = pitch;
+  if (dictId && !isSarvamV2(payload.model)) payload.dict_id = dictId;
   const response = await fetch("https://api.sarvam.ai/text-to-speech", {
     method: "POST",
     headers: {
@@ -99,26 +102,40 @@ async function synthesizeOpenAi({ text, voice, model, apiKey, speed = 1 }) {
 }
 
 export async function synthesizeSpeech({ agent, text, settings, publicBaseUrl = "" }) {
-  const spoken = spokenForTts(text).slice(0, 1400);
+  const callSettings = agent?.callSettings || {};
+  const pronunciations = callSettings.pronunciations || null;
+  const pronounced = applyPronunciations(text, agent?.language || "en-IN", pronunciations);
+  const spoken = spokenForTts(pronounced).slice(0, 1400);
   if (!spoken) return null;
   const tts = resolveTtsConfig(agent, settings);
   if (!tts.ready || tts.provider === "browser") {
     if (tts.provider !== "browser") {
       throw new Error(`Add a ${tts.provider} API key in Settings to use this voice.`);
     }
-    return { provider: "browser" };
+    return { provider: "browser", text: spoken };
   }
   const { pace, pitch } = voiceDynamics(agent);
+  const withAmbient = ambientEnabled(callSettings);
+  const ambVol = ambientVolume(callSettings);
+  let dictId = String(callSettings.sarvamDictId || "").trim();
+  if (!dictId && tts.provider === "sarvam" && pronunciationCount(pronunciations) > 0) {
+    try {
+      dictId = await ensureSarvamDictId(tts.apiKey, pronunciations);
+      if (dictId && agent?.callSettings) agent.callSettings.sarvamDictId = dictId;
+    } catch (error) {
+      console.warn("Sarvam pronunciation dict upload skipped:", error.message);
+    }
+  }
   const id = clipId({
     provider: tts.provider,
     model: tts.model,
     voice: tts.voice,
     language: tts.language,
-    text: `${spoken}|p${pace}|t${pitch}`,
+    text: `${spoken}|p${pace}|t${pitch}|d${dictId || "local"}|a${withAmbient ? ambVol : 0}`,
   });
   const existing = await getTtsClip(id);
   if (!existing) {
-    const made =
+    let made =
       tts.provider === "sarvam"
         ? await synthesizeSarvam({
             text: spoken,
@@ -128,6 +145,7 @@ export async function synthesizeSpeech({ agent, text, settings, publicBaseUrl = 
             apiKey: tts.apiKey,
             pace,
             pitch,
+            dictId,
           })
         : await synthesizeOpenAi({
             text: spoken,
@@ -136,6 +154,10 @@ export async function synthesizeSpeech({ agent, text, settings, publicBaseUrl = 
             apiKey: tts.apiKey,
             speed: pace,
           });
+    if (withAmbient) {
+      const mixed = await mixAmbientIntoSpeech(made.buffer, { volume: ambVol, ext: made.ext });
+      made = { buffer: mixed, ext: "mp3" };
+    }
     await saveClip(id, made.buffer, made.ext);
   }
   const clip = await getTtsClip(id);
@@ -147,5 +169,6 @@ export async function synthesizeSpeech({ agent, text, settings, publicBaseUrl = 
     contentType: clip.contentType,
     audioUrl: "/api/tts/" + id,
     publicAudioUrl: publicBaseUrl ? `${publicBaseUrl}/api/tts/${id}` : `/api/tts/${id}`,
+    dictId: dictId || null,
   };
 }

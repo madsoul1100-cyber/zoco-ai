@@ -9,7 +9,7 @@ import { GeniePanel } from "../components/GeniePanel.jsx";
 import { compileInstructions, resolveInstructionSections, splitInstructionText } from "../lib/instructionPacks.js";
 import { callSettings } from "../lib/builder.js";
 import { languageLabel } from "../lib/languages.js";
-import { loadVoices, pickVoice, speakText, playAudio, stopAudio, voicesForLang, spokenForTts, isNoiseTranscript } from "../lib/voice.js";
+import { loadVoices, pickVoice, speakText, playAudio, stopAudio, startAmbient, stopAmbient, voicesForLang, spokenForTts, isNoiseTranscript } from "../lib/voice.js";
 
 function delay(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
@@ -113,6 +113,9 @@ export default function AgentStudio() {
   const catalogRef = useRef(null);
   const asrLoopRef = useRef(false);
   const asrGenerationRef = useRef(0);
+  const nudgeIndexRef = useRef(0);
+  const nudgeTimerRef = useRef(null);
+  const quietSinceRef = useRef(0);
   const [tab, setTab] = useState(() => {
     const requested = searchParams.get("tab");
     if (requested && RAIL.some((item) => item.id === requested)) return requested;
@@ -217,6 +220,8 @@ export default function AgentStudio() {
     setMode("voice");
     modeRef.current = "voice";
     wantListenRef.current = false;
+    nudgeIndexRef.current = 0;
+    clearNudgeTimer();
     stopListening();
     callRef.current = existing;
     setCall(existing);
@@ -295,6 +300,8 @@ export default function AgentStudio() {
     sendingRef.current = true;
     wantListenRef.current = false;
     clearTimeout(silenceRef.current);
+    clearNudgeTimer();
+    nudgeIndexRef.current = 0;
     stopListening();
     setDraft("");
     transcriptRef.current = "";
@@ -345,6 +352,7 @@ export default function AgentStudio() {
     if (!isLive() || modeRef.current !== "voice") return;
     wantListenRef.current = true;
     setPhase("listening");
+    scheduleNudge();
     // Defer so any exiting ASR loop finally-block finishes first.
     setTimeout(() => {
       if (!wantListenRef.current || speakingRef.current || sendingRef.current || !isLive()) return;
@@ -390,15 +398,56 @@ export default function AgentStudio() {
 
   async function stopMic() {
     wantListenRef.current = false;
+    clearTimeout(nudgeTimerRef.current);
     stopListening();
     speakingRef.current = false;
     stopAudio();
+    stopAmbient();
     if (recorder.current?.state === "recording") recorder.current.stop();
     window.speechSynthesis?.cancel();
   }
 
+  function clearNudgeTimer() {
+    clearTimeout(nudgeTimerRef.current);
+    nudgeTimerRef.current = null;
+  }
+
+  function scheduleNudge() {
+    clearNudgeTimer();
+    if (modeRef.current !== "voice" || !isLive() || speakingRef.current || sendingRef.current) return;
+    const settings = callSettings(agentRef.current);
+    if (!settings.nudgeEnabled) return;
+    const nudges = (settings.nudges || []).filter((n) => String(n?.message || "").trim());
+    if (!nudges.length) return;
+    const index = nudgeIndexRef.current;
+    if (index >= nudges.length) {
+      if (!settings.hangupAfterNudges) return;
+      const waitMs = Math.max(3, Number(nudges[nudges.length - 1]?.afterSeconds || 5)) * 1000;
+      nudgeTimerRef.current = setTimeout(() => {
+        if (!wantListenRef.current || speakingRef.current || sendingRef.current || !isLive()) return;
+        mark("no_answer", "no_answer", "No response after nudges");
+      }, waitMs);
+      return;
+    }
+    const waitMs = Math.max(3, Number(nudges[index].afterSeconds || 5)) * 1000;
+    quietSinceRef.current = Date.now();
+    nudgeTimerRef.current = setTimeout(async () => {
+      if (!wantListenRef.current || speakingRef.current || sendingRef.current || !isLive()) return;
+      const message = String(nudges[index].message || "").trim();
+      nudgeIndexRef.current = index + 1;
+      if (!message) {
+        scheduleNudge();
+        return;
+      }
+      wantListenRef.current = false;
+      await speak(message);
+      if (isLive()) resumeListening();
+    }, waitMs);
+  }
+
   async function speak(text) {
     wantListenRef.current = false;
+    clearNudgeTimer();
     stopListening();
     const display = String(text || "").replace(/\[END:[a-z_]+\]/gi, "").trim();
     const clean = spokenForTts(display);
@@ -408,7 +457,12 @@ export default function AgentStudio() {
     setPhase("speaking");
     const spokenLang = callRef.current?.language || agentRef.current?.language || "en-IN";
     const ttsProvider = agentRef.current?.ttsProvider || "browser";
+    const settings = callSettings(agentRef.current);
+    const useClientAmbient = settings.backgroundSound === "quiet_office" && ttsProvider === "browser";
     try {
+      if (useClientAmbient) {
+        startAmbient("/api/ambient/quiet-office", settings.backgroundVolume ?? 0.12);
+      }
       if (ttsProvider !== "browser") {
         try {
           const clip = await Promise.race([
@@ -437,14 +491,15 @@ export default function AgentStudio() {
         await speakText(clean, {
           voice: voiceRef.current,
           lang: spokenLang,
-          rate: Number(agentRef.current?.callSettings?.speakingSpeed ?? 1),
-          pitch: 1 + Number(agentRef.current?.callSettings?.pitch || 0),
+          rate: Number(settings.speakingSpeed ?? 1),
+          pitch: 1 + Number(settings.pitch || 0),
           cancel: true,
         });
       }
     } finally {
       speakingRef.current = false;
       ignoreUntilRef.current = Date.now() + 600;
+      if (useClientAmbient) stopAmbient();
     }
   }
 
@@ -452,6 +507,7 @@ export default function AgentStudio() {
     asrLoopRef.current = false;
     asrGenerationRef.current += 1;
     clearTimeout(silenceRef.current);
+    clearNudgeTimer();
     try {
       recognitionRef.current?.abort();
     } catch {
@@ -467,6 +523,7 @@ export default function AgentStudio() {
   function startPersistentListen() {
     wantListenRef.current = true;
     transcriptRef.current = "";
+    scheduleNudge();
     startRecognition();
   }
 

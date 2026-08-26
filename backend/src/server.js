@@ -7,9 +7,12 @@ import { renderGreeting } from "./engine/template.js";
 import { applyOutcome, dashboardStats, DISPOSITIONS } from "./engine/rules.js";
 import { publicProviderCatalog, resolveLlmConfig } from "./engine/providers.js";
 import { sttReady, transcribeAudio, transcribeFromUrl } from "./engine/stt.js";
+import { QUIET_OFFICE_PATH } from "./engine/ambient.js";
+import { callTimedOut, isMachineAnswer, silenceAction, voicemailMessage } from "./engine/callBehavior.js";
 import { getTtsClip, synthesizeSpeech } from "./engine/tts.js";
 import { translateText } from "./engine/translate.js";
 import { getLanguage, normalizeLanguage, publicLanguages, resolveSpokenLanguage, isNoiseTranscript } from "./languages.js";
+import { readFile } from "node:fs/promises";
 import { connectInfra, infraHealth } from "./infra/connect.js";
 import { listTurns } from "./infra/events.js";
 import { startCallWorker } from "./infra/queue.js";
@@ -33,6 +36,7 @@ import {
   mapTwilioStatus,
   publicTelephony,
   recordListenTwiml,
+  redirectTwilioCall,
   resolveTelephony,
   sendWhatsApp,
   syncInboundWebhook,
@@ -142,6 +146,19 @@ app.post("/api/translate", async (req, res) => {
     res.json({ text: translated, to });
   } catch (error) {
     res.status(400).json({ error: error.message });
+  }
+});
+
+app.get("/api/ambient/quiet-office", async (_req, res) => {
+  try {
+    const { ensureQuietOfficeAudio } = await import("./engine/ambient.js");
+    await ensureQuietOfficeAudio();
+    const buffer = await readFile(QUIET_OFFICE_PATH);
+    res.setHeader("Content-Type", "audio/mpeg");
+    res.setHeader("Cache-Control", "public, max-age=86400");
+    res.send(buffer);
+  } catch {
+    res.status(404).json({ error: "Ambient audio missing" });
   }
 });
 
@@ -782,7 +799,15 @@ function sendTwiml(res, xml) {
   res.send(xml);
 }
 
-async function spokenTwiml({ agent, say, language, actionUrl, hangup = false, record = false, callId, transferTo }) {
+function nextSilenceSeconds(agent, call) {
+  const settings = agent?.callSettings || {};
+  const nudges = Array.isArray(settings.nudges) ? settings.nudges : [];
+  const index = Number(call?.nudgeIndex || 0);
+  const next = nudges[index];
+  return Number(next?.afterSeconds || 6);
+}
+
+async function spokenTwiml({ agent, say, language, actionUrl, hangup = false, record = false, callId, transferTo, silenceTimeout }) {
   const tel = await resolveTelephony();
   const spokenLanguage = language || agent?.language || "en-IN";
   let audioUrl = null;
@@ -811,10 +836,11 @@ async function spokenTwiml({ agent, say, language, actionUrl, hangup = false, re
     record && callId
       ? `${tel.publicBaseUrl}/webhooks/twilio/recording?callId=${encodeURIComponent(callId)}`
       : "";
+  const timeout = silenceTimeout ?? 6;
   if (await sttReady()) {
-    return recordListenTwiml({ say, actionUrl, language: spokenLanguage, audioUrl, recordingCallbackUrl });
+    return recordListenTwiml({ say, actionUrl, language: spokenLanguage, audioUrl, recordingCallbackUrl, silenceTimeout: timeout });
   }
-  return gatherTwiml({ say, actionUrl, language: spokenLanguage, audioUrl, recordingCallbackUrl });
+  return gatherTwiml({ say, actionUrl, language: spokenLanguage, audioUrl, recordingCallbackUrl, silenceTimeout: timeout });
 }
 
 async function speechFromTwilio(req, language) {
@@ -947,6 +973,24 @@ app.post("/webhooks/twilio/voice", async (req, res) => {
   const spoken = getLanguage(language);
   if (!call) return sendTwiml(res, hangupTwiml({ say: spoken.inactive, language }));
   const tel = await resolveTelephony();
+
+  if (isMachineAnswer(req.body?.AnsweredBy) && voicemailMessage(agent)) {
+    call.answeredBy = req.body.AnsweredBy;
+    const rules = await getRules();
+    const next = applyOutcome(call, { status: "voicemail", disposition: "voicemail", reason: `Twilio ${req.body.AnsweredBy}` }, rules);
+    await saveCall(next);
+    await scheduleFollowUp(next);
+    return sendTwiml(res, await spokenTwiml({ agent, say: voicemailMessage(agent), language, hangup: true }));
+  }
+
+  if (callTimedOut(call, agent)) {
+    const rules = await getRules();
+    const next = applyOutcome(call, { status: "completed", disposition: "dropped", reason: "Max call length reached" }, rules);
+    await saveCall(next);
+    await scheduleFollowUp(next);
+    return sendTwiml(res, await spokenTwiml({ agent, say: "Thank you for your time. Goodbye.", language, hangup: true }));
+  }
+
   const greeting =
     [...(call.messages || [])].reverse().find((m) => m.role === "assistant")?.text ||
     renderGreeting(agent, call.customer) ||
@@ -963,9 +1007,49 @@ app.post("/webhooks/twilio/voice", async (req, res) => {
   }
   call.status = "in_progress";
   call.disposition = "in_progress";
+  if (!call.startedAt) call.startedAt = new Date().toISOString();
+  call.nudgeIndex = Number(call.nudgeIndex || 0);
   await saveCall(call);
   const actionUrl = `${tel.publicBaseUrl}/webhooks/twilio/gather?callId=${encodeURIComponent(call.id)}`;
-  sendTwiml(res, await spokenTwiml({ agent, say: greeting, language, actionUrl }));
+  sendTwiml(res, await spokenTwiml({
+    agent,
+    say: greeting,
+    language,
+    actionUrl,
+    silenceTimeout: nextSilenceSeconds(agent, call),
+  }));
+});
+
+app.post("/webhooks/twilio/amd", async (req, res) => {
+  const call = await findCallFromTwilio(req);
+  if (!call) return res.sendStatus(204);
+  const agent = await getCallAgent(call);
+  const answeredBy = req.body?.AnsweredBy || req.body?.answeredBy;
+  call.answeredBy = answeredBy;
+  if (!isMachineAnswer(answeredBy) || !voicemailMessage(agent)) {
+    await saveCall(call);
+    return res.sendStatus(204);
+  }
+  const tel = await resolveTelephony();
+  const rules = await getRules();
+  const next = applyOutcome(call, { status: "voicemail", disposition: "voicemail", reason: `Twilio AMD ${answeredBy}` }, rules);
+  await saveCall(next);
+  await scheduleFollowUp(next);
+  const vmUrl = `${tel.publicBaseUrl}/webhooks/twilio/voicemail?callId=${encodeURIComponent(call.id)}`;
+  try {
+    await redirectTwilioCall({ tel, callSid: call.twilioSid || req.body?.CallSid, url: vmUrl });
+  } catch (error) {
+    console.warn("Could not redirect to voicemail:", error.message);
+  }
+  res.sendStatus(204);
+});
+
+app.post("/webhooks/twilio/voicemail", async (req, res) => {
+  const call = await findCallFromTwilio(req);
+  const agent = call ? await getCallAgent(call) : null;
+  const language = resolveSpokenLanguage(call, agent);
+  const say = voicemailMessage(agent) || "I will call you back later. Goodbye.";
+  sendTwiml(res, await spokenTwiml({ agent, say, language, hangup: true }));
 });
 
 app.post("/webhooks/twilio/gather", async (req, res) => {
@@ -977,12 +1061,48 @@ app.post("/webhooks/twilio/gather", async (req, res) => {
   const spokenLang = getLanguage(startLanguage);
   if (!call) return sendTwiml(res, hangupTwiml({ say: spokenLang.inactive, language: startLanguage }));
   const actionUrl = `${tel.publicBaseUrl}/webhooks/twilio/gather?callId=${encodeURIComponent(call.id)}`;
+
+  if (callTimedOut(call, agent)) {
+    const rules = await getRules();
+    const next = applyOutcome(call, { status: "completed", disposition: "dropped", reason: "Max call length reached" }, rules);
+    await saveCall(next);
+    await scheduleFollowUp(next);
+    return sendTwiml(res, await spokenTwiml({ agent, say: "Thank you for your time. Goodbye.", language: startLanguage, hangup: true }));
+  }
+
   const spoken = await speechFromTwilio(req, startLanguage);
 
   if (!spoken || isNoiseTranscript(spoken, call.messages?.filter((m) => m.role === "assistant").at(-1)?.text)) {
-    return sendTwiml(res, await spokenTwiml({ agent, say: spokenLang.missed, language: startLanguage, actionUrl }));
+    const action = silenceAction(call, agent, { missedFallback: spokenLang.missed });
+    call.nudgeIndex = action.nextIndex;
+    if (action.hangup) {
+      const rules = await getRules();
+      const next = applyOutcome(call, { status: "no_answer", disposition: "no_answer", reason: action.reason || "No response after nudges" }, rules);
+      await saveCall(next);
+      await scheduleFollowUp(next);
+      return sendTwiml(res, hangupTwiml({ say: "", language: startLanguage }));
+    }
+    if (action.kind === "nudge" && action.text) {
+      await attachTurn(call, {
+        id: `msg_${uuid().slice(0, 8)}`,
+        role: "assistant",
+        text: action.text,
+        timestamp: new Date().toISOString(),
+        audioOffsetMs: null,
+        kind: "nudge",
+      }, "telephony");
+    }
+    await saveCall(call);
+    return sendTwiml(res, await spokenTwiml({
+      agent,
+      say: action.text || spokenLang.missed,
+      language: startLanguage,
+      actionUrl,
+      silenceTimeout: action.afterSeconds || nextSilenceSeconds(agent, call),
+    }));
   }
 
+  call.nudgeIndex = 0;
   await attachTurn(call, {
     id: `msg_${uuid().slice(0, 8)}`,
     role: "user",
@@ -1036,7 +1156,13 @@ app.post("/webhooks/twilio/gather", async (req, res) => {
   }
 
   await saveCall(call);
-  sendTwiml(res, await spokenTwiml({ agent, say: reply.text, language, actionUrl }));
+  sendTwiml(res, await spokenTwiml({
+    agent,
+    say: reply.text,
+    language,
+    actionUrl,
+    silenceTimeout: nextSilenceSeconds(agent, call),
+  }));
 });
 
 app.post("/webhooks/twilio/status", async (req, res) => {

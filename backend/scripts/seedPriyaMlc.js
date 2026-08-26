@@ -6,6 +6,7 @@ import { connectInfra } from "../src/infra/connect.js";
 import { mongoState } from "../src/infra/mongo.js";
 import { loadEnv } from "../src/loadEnv.js";
 import { ensureStore, getAgent, getKnowledgeBase, saveAgent, saveKnowledgeBase } from "../src/store.js";
+import { ensureSarvamDictId, loadPriyaDictionary, pronunciationCount } from "../src/engine/pronunciation.js";
 import {
   INSTRUCTION_SECTION_TITLES,
   MLC_INSTRUCTION_PACK,
@@ -21,6 +22,17 @@ const now = new Date().toISOString();
 const KB_ID = "kb_mlc_graduates_priya";
 const AGENT_ID = "agt_priya_mlc_outbound";
 
+const pronunciations = await loadPriyaDictionary();
+let sarvamDictId = "";
+const sarvamKey = String(process.env.SARVAM_API_KEY || "").trim();
+if (sarvamKey) {
+  try {
+    sarvamDictId = await ensureSarvamDictId(sarvamKey, pronunciations);
+    console.log("Uploaded Sarvam pronunciation dict:", sarvamDictId);
+  } catch (error) {
+    console.warn("Could not upload Sarvam pronunciation dict:", error.message);
+  }
+}
 const GREETING =
   "హలో, {{ customer_name }} గారితోనే మాట్లాడుతున్నానా? అమర్నాథ్ సారంగుల గారి టీమ్ నుంచి వాయిస్ అసిస్టెంట్ ప్రియా మాట్లాడుతున్నాను. ఒక ముప్పై సెకన్లు మాట్లాడొచ్చా?";
 
@@ -116,10 +128,15 @@ const callSettings = {
   temperature: 0.7,
   allowInterrupt: true,
   eagerness: 6,
+  volumeThresholdDb: -50,
+  backgroundSound: "quiet_office",
+  backgroundVolume: 0.12,
   switchLanguage: true,
   allowedLanguages: ["te-IN", "hi-IN", "en-IN"],
   autoDetectLanguage: true,
   indicNumbers: true,
+  pronunciations,
+  sarvamDictId,
   nudgeEnabled: true,
   nudges: [
     { id: "nudge_1", message: "Hello? Are you on the call?", afterSeconds: 5 },
@@ -178,6 +195,17 @@ const agent = await saveAgent({
 
 console.log(JSON.stringify({
   ok: true,
-  agent: { id: agent.id, name: agent.name, sections: agent.instructionSections.length, outputs: agent.outputVariables.length, kb: agent.knowledgeBaseIds },
+  agent: {
+    id: agent.id,
+    name: agent.name,
+    sections: agent.instructionSections.length,
+    outputs: agent.outputVariables.length,
+    kb: agent.knowledgeBaseIds,
+    pronunciations: pronunciationCount(agent.callSettings?.pronunciations),
+    sarvamDictId: agent.callSettings?.sarvamDictId || null,
+    backgroundSound: agent.callSettings?.backgroundSound,
+    nudges: agent.callSettings?.nudgeEnabled,
+    voicemail: agent.callSettings?.voicemailEnabled,
+  },
   knowledge: { id: kb.id, name: kb.name, documents: kb.documents.length },
 }, null, 2));

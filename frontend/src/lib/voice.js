@@ -62,6 +62,7 @@ export function pickVoice(voices, preferredName, lang = "en-IN") {
 }
 
 let currentPlayer = null;
+let ambientPlayer = null;
 
 export function stopAudio() {
   if (!currentPlayer) return;
@@ -73,6 +74,31 @@ export function stopAudio() {
     /* ignore */
   }
   currentPlayer = null;
+}
+
+export function stopAmbient() {
+  if (!ambientPlayer) return;
+  try {
+    ambientPlayer.pause();
+    ambientPlayer.removeAttribute("src");
+    ambientPlayer.load();
+  } catch {
+    /* ignore */
+  }
+  ambientPlayer = null;
+}
+
+export function startAmbient(url, volume = 0.12) {
+  stopAmbient();
+  if (!url) return null;
+  const audio = new Audio(url);
+  audio.loop = true;
+  audio.volume = Math.min(0.4, Math.max(0.02, Number(volume) || 0.12));
+  ambientPlayer = audio;
+  audio.play().catch(() => {
+    if (ambientPlayer === audio) stopAmbient();
+  });
+  return audio;
 }
 
 export function playAudio(url, { timeoutMs = 25000 } = {}) {

@@ -43,10 +43,14 @@ export async function dialLiveCall(call) {
     ].filter(Boolean);
     throw new Error(`Live phone calling is not ready. Add: ${missing.join(", ")}`);
   }
-  const result = await placeTwilioCall({ call, tel });
+  const agent = await getCallAgent(call);
+  const detectVoicemail = Boolean(agent?.callSettings?.voicemailEnabled);
+  const result = await placeTwilioCall({ call, tel, detectVoicemail });
   call.channel = "telephony";
   call.twilioSid = result.sid;
   call.status = "ringing";
+  call.nudgeIndex = 0;
+  if (!call.startedAt) call.startedAt = new Date().toISOString();
   await attachTurn(call, {
     id: `msg_${uuid().slice(0, 8)}`,
     role: "system",

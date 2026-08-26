@@ -1,5 +1,6 @@
 import { useState } from "react";
 import { api } from "../api.js";
+import { Modal } from "./ui.jsx";
 import { LANGUAGES, languageLabel } from "../lib/languages.js";
 import { useGreetingGenderSync, withSpokenGreeting } from "../lib/greetingTranslate.js";
 import { brainKey, mergeLlmCatalog, parseBrain, voiceGender } from "../lib/providers.js";
@@ -14,6 +15,39 @@ import {
   patchSettings,
 } from "../lib/builder.js";
 
+function pronunciationMaps(pronunciations) {
+  if (!pronunciations || typeof pronunciations !== "object") return {};
+  if (pronunciations.pronunciations && typeof pronunciations.pronunciations === "object") {
+    return pronunciations.pronunciations;
+  }
+  return pronunciations;
+}
+
+function pronunciationCount(pronunciations) {
+  return Object.values(pronunciationMaps(pronunciations)).reduce(
+    (n, map) => n + (map && typeof map === "object" ? Object.keys(map).length : 0),
+    0
+  );
+}
+
+function pronunciationRows(pronunciations) {
+  const maps = pronunciationMaps(pronunciations);
+  const rows = [];
+  for (const [language, map] of Object.entries(maps)) {
+    if (!map || typeof map !== "object") continue;
+    for (const [word, phoneme] of Object.entries(map)) {
+      rows.push({ language, word, phoneme: String(phoneme || "") });
+    }
+  }
+  return rows.sort((a, b) => a.language.localeCompare(b.language) || a.word.localeCompare(b.word));
+}
+
+function languageDisplay(code) {
+  if (code === "te-IN" || code === "Telugu") return "Telugu";
+  if (code === "hi-IN" || code === "Hindi") return "Hindi";
+  if (code === "en-IN" || code === "English") return "English";
+  return languageLabel(code) || code;
+}
 function SubTabs({ value, onChange, items }) {
   return (
     <div className="subtabs">
@@ -313,6 +347,8 @@ export function SettingsPanel({
   const allowed = settings.allowedLanguages || [];
   const [previewing, setPreviewing] = useState(false);
   const [translating, setTranslating] = useState(false);
+  const [dictOpen, setDictOpen] = useState(false);
+  const [dictFilter, setDictFilter] = useState("");
   const genderSyncing = useGreetingGenderSync(agent, catalog, onChange);
   const llmList = mergeLlmCatalog(catalog?.llm);
   const brainProvider = agent.llmProvider || catalog?.defaultLlmProvider || "openrouter";
@@ -323,7 +359,29 @@ export function SettingsPanel({
   const gender = voiceGender(catalog, agent);
   const busyTranslate = translating || genderSyncing;
   const sarvamV3 = String(agent.ttsModel || "").includes("v3");
+  const dictCount = pronunciationCount(settings.pronunciations);
+  const dictRows = pronunciationRows(settings.pronunciations);
+  const filteredDictRows = dictFilter.trim()
+    ? dictRows.filter((row) => {
+        const q = dictFilter.trim().toLowerCase();
+        return (
+          row.word.toLowerCase().includes(q) ||
+          row.phoneme.toLowerCase().includes(q) ||
+          languageDisplay(row.language).toLowerCase().includes(q)
+        );
+      })
+    : dictRows;
 
+  function downloadDictionary() {
+    const maps = pronunciationMaps(settings.pronunciations);
+    const blob = new Blob([JSON.stringify({ pronunciations: maps }, null, 2)], { type: "application/json" });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = "tts-dictionary.json";
+    a.click();
+    URL.revokeObjectURL(url);
+  }
   async function previewVoice() {
     const sample = spokenForTts(agent.greeting || "Hi, this is Zoco. How can I help?");
     onError?.("");
@@ -486,6 +544,94 @@ export function SettingsPanel({
         >
           <RangeControl min={-0.75} max={0.75} step={0.05} value={settings.pitch} onChange={(pitch) => set({ pitch })} />
         </SettingRow>
+        <SettingRow title="Pronunciation dictionary" hint="Custom word pronunciations applied before TTS (and uploaded to Sarvam bulbul:v3 when connected)" wide>
+          <div className="dict-row">
+            {dictCount ? (
+              <button type="button" className="btn ghost" onClick={() => setDictOpen(true)}>
+                {dictCount} entries
+              </button>
+            ) : (
+              <span className="muted">No dictionary</span>
+            )}
+            <label className="btn ghost">
+              {dictCount ? "Replace dictionary" : "Upload JSON"}
+              <input
+                type="file"
+                accept="application/json,.json"
+                hidden
+                onChange={async (e) => {
+                  const file = e.target.files?.[0];
+                  e.target.value = "";
+                  if (!file) return;
+                  try {
+                    const raw = JSON.parse(await file.text());
+                    const pronunciations = raw?.pronunciations || raw;
+                    set({ pronunciations, sarvamDictId: "" });
+                    setDictOpen(true);
+                  } catch {
+                    window.alert("Could not read that pronunciation dictionary JSON.");
+                  }
+                }}
+              />
+            </label>
+            {dictCount ? (
+              <>
+                <button type="button" className="btn ghost" onClick={downloadDictionary}>
+                  Download
+                </button>
+                <button type="button" className="btn ghost" onClick={() => set({ pronunciations: null, sarvamDictId: "" })}>
+                  Delete dictionary
+                </button>
+              </>
+            ) : null}
+          </div>
+        </SettingRow>
+
+        <Modal
+          open={dictOpen}
+          title="Pronunciation dictionary"
+          onClose={() => setDictOpen(false)}
+          footer={
+            <>
+              <button type="button" className="btn ghost" onClick={downloadDictionary}>Download JSON</button>
+              <button type="button" className="btn" onClick={() => setDictOpen(false)}>Close</button>
+            </>
+          }
+        >
+          <p className="muted dict-meta">{dictCount} custom pronunciations loaded</p>
+          <input
+            className="input"
+            placeholder="Search word, phoneme, or language…"
+            value={dictFilter}
+            onChange={(e) => setDictFilter(e.target.value)}
+          />
+          <div className="dict-table-wrap">
+            <table className="dict-table">
+              <thead>
+                <tr>
+                  <th>Word</th>
+                  <th>Phoneme</th>
+                  <th>Language</th>
+                </tr>
+              </thead>
+              <tbody>
+                {filteredDictRows.length === 0 ? (
+                  <tr>
+                    <td colSpan={3} className="muted">No matching entries</td>
+                  </tr>
+                ) : (
+                  filteredDictRows.map((row) => (
+                    <tr key={`${row.language}::${row.word}`}>
+                      <td>{row.word}</td>
+                      <td>/{row.phoneme}/</td>
+                      <td>{languageDisplay(row.language)}</td>
+                    </tr>
+                  ))
+                )}
+              </tbody>
+            </table>
+          </div>
+        </Modal>
 
         <h3>Thinking & knowledge</h3>
         <SettingRow title="AI brain" hint="Sarvam, Grok, OpenAI, and OpenRouter. Keys live in Settings.">
@@ -546,6 +692,40 @@ export function SettingsPanel({
         <SettingRow title="Eagerness to respond" hint="How quickly the agent replies after a pause. Lower waits less.">
           <RangeControl min={1} max={10} step={1} value={settings.eagerness} onChange={(eagerness) => set({ eagerness })} />
         </SettingRow>
+        <SettingRow title="Volume threshold" hint="Quieter audio below this level counts as silence. Lower includes more noise.">
+          <RangeControl
+            min={-70}
+            max={-20}
+            step={1}
+            suffix=" dB"
+            digits={0}
+            value={settings.volumeThresholdDb ?? -50}
+            onChange={(volumeThresholdDb) => set({ volumeThresholdDb })}
+          />
+        </SettingRow>
+
+        <h3>Environment</h3>
+        <SettingRow title="Background sound" hint="Ambient noise behind the agent on voice tests and live Twilio TTS">
+          <select
+            className="input"
+            value={settings.backgroundSound || "off"}
+            onChange={(e) => set({ backgroundSound: e.target.value })}
+          >
+            <option value="off">None</option>
+            <option value="quiet_office">Quiet office</option>
+          </select>
+        </SettingRow>
+        {settings.backgroundSound === "quiet_office" ? (
+          <SettingRow title="Background volume" hint="How loud the ambient noise plays under speech">
+            <RangeControl
+              min={0.02}
+              max={0.35}
+              step={0.01}
+              value={settings.backgroundVolume ?? 0.12}
+              onChange={(backgroundVolume) => set({ backgroundVolume })}
+            />
+          </SettingRow>
+        ) : null}
 
         <h3>Language personalisation</h3>
         <SettingRow title="Spoken language" hint={busyTranslate ? "Translating your English greeting…" : "Write the greeting in English. Changing language translates it. On a live call the agent can still follow the caller."}>
@@ -629,10 +809,37 @@ export function SettingsPanel({
                   }
                 />
                 <span className="muted">sec</span>
+                {(settings.nudges || []).length > 1 ? (
+                  <button
+                    type="button"
+                    className="btn ghost"
+                    onClick={() => set({ nudges: settings.nudges.filter((_, i) => i !== index) })}
+                  >
+                    Remove
+                  </button>
+                ) : null}
               </div>
             </SettingRow>
           ))
           : null}
+        {settings.nudgeEnabled ? (
+          <SettingRow title="Add nudge" hint="Extra message if the caller stays quiet">
+            <button
+              type="button"
+              className="btn ghost"
+              onClick={() =>
+                set({
+                  nudges: [
+                    ...(settings.nudges || []),
+                    { id: `nudge_${Date.now().toString(36)}`, message: "Hello?", afterSeconds: 10 },
+                  ],
+                })
+              }
+            >
+              Add More
+            </button>
+          </SettingRow>
+        ) : null}
         <SettingRow title="Hang up after unanswered nudges" hint="End the call if the caller still doesn’t respond">
           <label className="switch">
             <input type="checkbox" checked={settings.hangupAfterNudges} onChange={(e) => set({ hangupAfterNudges: e.target.checked })} />
