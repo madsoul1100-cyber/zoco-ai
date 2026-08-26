@@ -61,14 +61,46 @@ export function pickVoice(voices, preferredName, lang = "en-IN") {
   );
 }
 
-export function playAudio(url) {
+let currentPlayer = null;
+
+export function stopAudio() {
+  if (!currentPlayer) return;
+  try {
+    currentPlayer.pause();
+    currentPlayer.removeAttribute("src");
+    currentPlayer.load();
+  } catch {
+    /* ignore */
+  }
+  currentPlayer = null;
+}
+
+export function playAudio(url, { timeoutMs = 25000 } = {}) {
   return new Promise((resolve, reject) => {
     if (!url) return reject(new Error("No audio to play"));
     window.speechSynthesis?.cancel();
+    stopAudio();
     const audio = new Audio(url);
-    audio.onended = () => resolve();
-    audio.onerror = () => reject(new Error("Could not play the selected voice"));
-    audio.play().catch((err) => reject(new Error(err.message || "Could not play the selected voice")));
+    currentPlayer = audio;
+    let settled = false;
+    const finish = (fn, value) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      if (currentPlayer === audio) stopAudio();
+      fn(value);
+    };
+    let timer = setTimeout(() => finish(resolve), timeoutMs);
+    audio.onloadedmetadata = () => {
+      const ms = Number(audio.duration) * 1000;
+      if (Number.isFinite(ms) && ms > 0) {
+        clearTimeout(timer);
+        timer = setTimeout(() => finish(resolve), Math.min(timeoutMs, ms + 1200));
+      }
+    };
+    audio.onended = () => finish(resolve);
+    audio.onerror = () => finish(reject, new Error("Could not play the selected voice"));
+    audio.play().catch((err) => finish(reject, new Error(err.message || "Could not play the selected voice")));
   });
 }
 

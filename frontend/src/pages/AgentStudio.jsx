@@ -9,7 +9,7 @@ import { GeniePanel } from "../components/GeniePanel.jsx";
 import { compileInstructions, resolveInstructionSections, splitInstructionText } from "../lib/instructionPacks.js";
 import { callSettings } from "../lib/builder.js";
 import { languageLabel } from "../lib/languages.js";
-import { loadVoices, pickVoice, speakText, playAudio, voicesForLang, spokenForTts, isNoiseTranscript } from "../lib/voice.js";
+import { loadVoices, pickVoice, speakText, playAudio, stopAudio, voicesForLang, spokenForTts, isNoiseTranscript } from "../lib/voice.js";
 
 function delay(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
@@ -112,6 +112,7 @@ export default function AgentStudio() {
   const ignoreUntilRef = useRef(0);
   const catalogRef = useRef(null);
   const asrLoopRef = useRef(false);
+  const asrGenerationRef = useRef(0);
   const [tab, setTab] = useState(() => {
     const requested = searchParams.get("tab");
     if (requested && RAIL.some((item) => item.id === requested)) return requested;
@@ -301,43 +302,54 @@ export default function AgentStudio() {
     setHeardText("");
     setLiveText("");
     setPhase("thinking");
+    let nextCall = null;
     try {
       if (modeRef.current === "voice") {
-        const next = await api.sendMessageStream(current.id, spoken, {
+        nextCall = await api.sendMessageStream(current.id, spoken, {
           source: "voice",
           onDelta: (token) => {
             setLiveText((prev) => `${prev}${token}`.replace(/\[END:[a-z_]+\]/gi, ""));
           },
         });
-        if (next) {
-          callRef.current = next;
-          setCall(next);
-          const last = [...next.messages].reverse().find((m) => m.role === "assistant");
-          setLiveText("");
-          if (last?.text) await speak(last.text);
-          await delay(700);
-          sendingRef.current = false;
-          if (isLive(next)) {
-            wantListenRef.current = true;
-            setPhase("listening");
-            startRecognition();
-          } else {
-            setPhase("idle");
-          }
-          return;
+        if (!nextCall) {
+          nextCall = await api.sendMessage(current.id, spoken, "voice");
         }
       } else {
-        const next = await api.sendMessage(current.id, spoken, modeRef.current === "voice" ? "voice" : "chat");
-        callRef.current = next;
-        setCall(next);
+        nextCall = await api.sendMessage(current.id, spoken, "chat");
+      }
+      if (!nextCall) throw new Error("No reply from agent");
+      callRef.current = nextCall;
+      setCall(nextCall);
+      setLiveText("");
+      // Unlock typing/mic before TTS so a hung audio play cannot freeze the call.
+      sendingRef.current = false;
+      if (modeRef.current === "voice") {
+        const last = [...nextCall.messages].reverse().find((m) => m.role === "assistant");
+        if (last?.text) await speak(last.text);
+        await delay(500);
+        if (isLive(nextCall)) resumeListening();
+        else setPhase("idle");
+      } else {
         setPhase("idle");
       }
     } catch (err) {
       setError(err.message);
       setPhase("idle");
+      if (isLive(callRef.current) && modeRef.current === "voice") resumeListening();
     } finally {
       sendingRef.current = false;
     }
+  }
+
+  function resumeListening() {
+    if (!isLive() || modeRef.current !== "voice") return;
+    wantListenRef.current = true;
+    setPhase("listening");
+    // Defer so any exiting ASR loop finally-block finishes first.
+    setTimeout(() => {
+      if (!wantListenRef.current || speakingRef.current || sendingRef.current || !isLive()) return;
+      if (!asrLoopRef.current && !recognitionRef.current) startRecognition();
+    }, 120);
   }
 
   async function mark(status, disposition, reason) {
@@ -380,6 +392,7 @@ export default function AgentStudio() {
     wantListenRef.current = false;
     stopListening();
     speakingRef.current = false;
+    stopAudio();
     if (recorder.current?.state === "recording") recorder.current.stop();
     window.speechSynthesis?.cancel();
   }
@@ -395,39 +408,49 @@ export default function AgentStudio() {
     setPhase("speaking");
     const spokenLang = callRef.current?.language || agentRef.current?.language || "en-IN";
     const ttsProvider = agentRef.current?.ttsProvider || "browser";
-    if (ttsProvider !== "browser") {
-      try {
-        const clip = await api.speak({
-          text: display,
-          agentId: agentRef.current?.id,
-          ttsProvider,
-          ttsVoice: agentRef.current?.ttsVoice,
-          ttsModel: agentRef.current?.ttsModel,
-          language: spokenLang,
-          callSettings: agentRef.current?.callSettings,
-        });
-        if (clip?.provider === "browser" || !clip?.audioUrl) {
-          throw new Error("Selected voice is not connected. Add the API key in Settings.");
+    try {
+      if (ttsProvider !== "browser") {
+        try {
+          const clip = await Promise.race([
+            api.speak({
+              text: display,
+              agentId: agentRef.current?.id,
+              ttsProvider,
+              ttsVoice: agentRef.current?.ttsVoice,
+              ttsModel: agentRef.current?.ttsModel,
+              language: spokenLang,
+              callSettings: agentRef.current?.callSettings,
+            }),
+            delay(18000).then(() => Promise.reject(new Error("Voice timed out"))),
+          ]);
+          if (clip?.provider === "browser" || !clip?.audioUrl) {
+            throw new Error("Selected voice is not connected. Add the API key in Settings.");
+          }
+          await Promise.race([
+            playAudio(clip.audioUrl),
+            delay(26000),
+          ]);
+        } catch (err) {
+          setError(err.message || "Selected voice failed. Check Settings for the provider key.");
         }
-        await playAudio(clip.audioUrl);
-      } catch (err) {
-        setError(err.message || "Selected voice failed. Check Settings for the provider key.");
+      } else {
+        await speakText(clean, {
+          voice: voiceRef.current,
+          lang: spokenLang,
+          rate: Number(agentRef.current?.callSettings?.speakingSpeed ?? 1),
+          pitch: 1 + Number(agentRef.current?.callSettings?.pitch || 0),
+          cancel: true,
+        });
       }
-    } else {
-      await speakText(clean, {
-        voice: voiceRef.current,
-        lang: spokenLang,
-        rate: Number(agentRef.current?.callSettings?.speakingSpeed ?? 1),
-        pitch: 1 + Number(agentRef.current?.callSettings?.pitch || 0),
-        cancel: true,
-      });
+    } finally {
+      speakingRef.current = false;
+      ignoreUntilRef.current = Date.now() + 600;
     }
-    speakingRef.current = false;
-    ignoreUntilRef.current = Date.now() + 600;
   }
 
   function stopListening() {
     asrLoopRef.current = false;
+    asrGenerationRef.current += 1;
     clearTimeout(silenceRef.current);
     try {
       recognitionRef.current?.abort();
@@ -450,11 +473,19 @@ export default function AgentStudio() {
   async function startSarvamLoop() {
     if (asrLoopRef.current) return;
     asrLoopRef.current = true;
+    const loopId = (asrGenerationRef.current += 1);
     setPhase("listening");
     let stream;
     try {
       stream = await navigator.mediaDevices.getUserMedia({ audio: true });
-      while (asrLoopRef.current && wantListenRef.current && !speakingRef.current && !sendingRef.current && isLive()) {
+      while (
+        asrLoopRef.current &&
+        asrGenerationRef.current === loopId &&
+        wantListenRef.current &&
+        !speakingRef.current &&
+        !sendingRef.current &&
+        isLive()
+      ) {
         const chunks = [];
         const media = new MediaRecorder(stream);
         media.ondataavailable = (event) => {
@@ -466,7 +497,7 @@ export default function AgentStudio() {
         await new Promise((resolve) => {
           media.onstop = resolve;
         });
-        if (!asrLoopRef.current || speakingRef.current || sendingRef.current) break;
+        if (!asrLoopRef.current || asrGenerationRef.current !== loopId || speakingRef.current || sendingRef.current) break;
         const blob = new Blob(chunks, { type: "audio/webm" });
         if (blob.size < 1800) continue;
         const { transcript } = await api.transcribe(blob, callRef.current?.language || agentRef.current?.language || "en-IN");
@@ -479,11 +510,26 @@ export default function AgentStudio() {
         }
       }
     } catch (err) {
-      if (wantListenRef.current) startBrowserRecognition();
-      else setError(err.message);
+      if (wantListenRef.current && asrGenerationRef.current === loopId) startBrowserRecognition();
+      else if (wantListenRef.current) setError(err.message);
     } finally {
-      asrLoopRef.current = false;
+      // Only clear the flag if this loop still owns it (a newer loop may already be running).
+      if (asrGenerationRef.current === loopId) asrLoopRef.current = false;
       stream?.getTracks().forEach((track) => track.stop());
+      if (
+        wantListenRef.current &&
+        asrGenerationRef.current === loopId &&
+        !speakingRef.current &&
+        !sendingRef.current &&
+        isLive() &&
+        !asrLoopRef.current
+      ) {
+        setTimeout(() => {
+          if (wantListenRef.current && !asrLoopRef.current && !speakingRef.current && !sendingRef.current && isLive()) {
+            startRecognition();
+          }
+        }, 150);
+      }
     }
   }
 
