@@ -22,7 +22,7 @@ const KB_ID = "kb_mlc_graduates_priya";
 const AGENT_ID = "agt_priya_mlc_outbound";
 
 const GREETING =
-  "హలో, {{ customer_name }} గారితోనే మాట్లాడుతున్నానా? అమర్నాథ్ సారంగుల గారి టీమ్ నుండి వాయిస్ అసిస్టెంట్ ప్రియ మాట్లాడుతున్నాను. Just thirty seconds మాట్లాడవచ్చా?";
+  "హలో, {{ customer_name }} గారితోనే మాట్లాడుతున్నానా? అమర్నాథ్ సారంగుల గారి టీమ్ నుంచి వాయిస్ అసిస్టెంట్ ప్రియా మాట్లాడుతున్నాను. ఒక ముప్పై సెకన్లు మాట్లాడొచ్చా?";
 
 const instructionSections = INSTRUCTION_SECTION_TITLES.map((title, index) => ({
   id: `sec_priya_${String(index + 1).padStart(2, "0")}`,

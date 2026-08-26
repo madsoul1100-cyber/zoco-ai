@@ -2,7 +2,7 @@ import cors from "cors";
 import express from "express";
 import multer from "multer";
 import { v4 as uuid } from "uuid";
-import { generateReply, streamModelTokens, parseSpoken, extractSlots, guardEarlyHangup, resolveLlm, followCustomerLanguage } from "./engine/conversation.js";
+import { generateReply } from "./engine/conversation.js";
 import { renderGreeting } from "./engine/template.js";
 import { applyOutcome, dashboardStats, DISPOSITIONS } from "./engine/rules.js";
 import { publicProviderCatalog, resolveLlmConfig } from "./engine/providers.js";
@@ -639,7 +639,6 @@ app.post("/api/calls/:id/messages/stream", async (req, res) => {
   if (!userText) return res.status(400).json({ error: "Message text is required" });
 
   const agent = await getCallAgent(call);
-  const llm = await resolveLlm(agent);
   const source = req.body?.source || inferSource(call);
   res.setHeader("Content-Type", "text/event-stream");
   res.setHeader("Cache-Control", "no-cache, no-transform");
@@ -659,35 +658,14 @@ app.post("/api/calls/:id/messages/stream", async (req, res) => {
     await saveCall(call);
     emit({ type: "user", text: userText });
 
-    const slots = { ...(call.gathered || {}), ...extractSlots(call.messages, userText) };
-    followCustomerLanguage(call, agent, userText);
-    const speaking = { ...agent, language: resolveSpokenLanguage(call, agent) };
-    let reply;
-    if (llm) {
-      let full = "";
-      for await (const token of streamModelTokens({
-        agent: speaking,
-        history: call.messages,
-        userText,
-        slots,
-        llm,
-        knowledge: await knowledgeContextForAgent(agent, userText),
-      })) {
-        full += token;
-        emit({ type: "delta", text: token });
-      }
-      reply = { ...guardEarlyHangup(parseSpoken(full), call), slots, provider: llm.provider, model: llm.model };
-      if (!reply.text) reply.text = String(full).replace(/\[END:[a-z_]+\]/gi, "").trim();
-    } else {
-      reply = await generateReply({
-        agent,
-        call,
-        userText,
-        knowledge: await knowledgeContextForAgent(agent, userText),
-        knowledgeFn: (ag, q) => knowledgeContextForAgent(ag, q),
-      });
-      emit({ type: "delta", text: reply.text });
-    }
+    const reply = await generateReply({
+      agent,
+      call,
+      userText,
+      knowledge: await knowledgeContextForAgent(agent, userText),
+      knowledgeFn: (ag, q) => knowledgeContextForAgent(ag, q),
+    });
+    emit({ type: "delta", text: reply.text || "" });
 
     call.gathered = { ...(call.gathered || {}), ...(reply.slots || {}) };
     call.llm = { provider: reply.provider, model: reply.model || null };
