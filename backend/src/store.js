@@ -300,17 +300,17 @@ export async function deleteKnowledgeBase(id) {
   await col("knowledgeBases").deleteOne({ _id: id });
 }
 
-export async function knowledgeContextForAgent(agent, question = "") {
+export async function knowledgeContextForAgent(agent, question = "", { limit = 4, maxChars = 4000 } = {}) {
   const ids = agent?.knowledgeBaseIds || [];
   if (!ids.length) return "";
   const bases = (await Promise.all(ids.map((id) => getKnowledgeBase(id)))).filter(Boolean);
   if (!bases.length) return "";
   const retrieved = question
     ? bases.flatMap((kb) =>
-        retrieveFromKnowledge(kb, question, 4).map((hit) => `${kb.name} / ${hit.name}:\n${hit.excerpt}`)
+        retrieveFromKnowledge(kb, question, limit).map((hit) => `${kb.name} / ${hit.name}:\n${hit.excerpt}`)
       )
     : [];
-  if (retrieved.length) return retrieved.join("\n\n").slice(0, 4000);
+  if (retrieved.length) return retrieved.join("\n\n").slice(0, maxChars);
   return bases
     .map((kb) => {
       const body = (kb.documents || [])
@@ -319,7 +319,7 @@ export async function knowledgeContextForAgent(agent, question = "") {
       return `${kb.name}\n${kb.description || ""}\n${body}`.trim();
     })
     .join("\n\n")
-    .slice(0, 6000);
+    .slice(0, Math.max(maxChars, 2000));
 }
 
 export function defaultInbound() {

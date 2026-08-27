@@ -84,6 +84,7 @@ function languageInstruction(agent) {
   }
   return [
     "Reply with spoken words only. No lists, markdown, emojis, question marks, or exclamation marks.",
+    "Sound like a calm human on a phone: natural pacing, contractions when speaking English, one clear thought per turn.",
     "Indian TTS voices read ? and ! out loud as 'question mark' and 'exclamation point'. Never write those characters.",
     "Do not add [END:...] until the customer has clearly given the success information, after at least two real customer replies.",
     "If the customer transcript is noise, punctuation, 'exclamation point', or 'question mark', briefly ask them to repeat. Do not end the call.",
@@ -103,7 +104,11 @@ function languageLock(agent) {
 
 export function buildModelMessages({ agent, history, userText, slots, knowledge }) {
   const rich = Array.isArray(agent?.instructionSections) && agent.instructionSections.length > 0;
-  const compiled = compiledAgentInstructions(agent);
+  const voiceStream = Boolean(agent?._voiceStream);
+  let compiled = compiledAgentInstructions(agent);
+  if (voiceStream && compiled.length > 2000) {
+    compiled = `${compiled.slice(0, 2000)}\n…(trimmed for voice latency — keep Opening/Pitch/Ending rules)`;
+  }
   const system = [
     `You are ${agent.name}, on a live phone call.`,
     rich
@@ -123,8 +128,8 @@ Hard speech rules from the Instructions (never break these):
       : agent.persona
         ? `Persona: ${agent.persona}`
         : "",
-    workflowInstruction(agent),
-    Array.isArray(agent.outputVariables) && agent.outputVariables.length
+    voiceStream ? "" : workflowInstruction(agent),
+    !voiceStream && Array.isArray(agent.outputVariables) && agent.outputVariables.length
       ? `After the call you must be able to fill these output variables from what was said: ${agent.outputVariables.map((item) => `${item.key} (${item.dataType || "string"}): ${item.prompt || ""}`).join("; ")}`
       : "",
     Array.isArray(agent.customTools) && agent.customTools.length
@@ -132,6 +137,9 @@ Hard speech rules from the Instructions (never break these):
       : "",
     knowledge ? `Use this knowledge base only when the customer asks something factual. Never read it out as a list. Knowledge:\n${knowledge}` : "",
     slots && Object.keys(slots).length ? `Known details: ${JSON.stringify(slots)}` : "",
+    voiceStream
+      ? "VOICE STREAM LATENCY: Reply in ONE short spoken sentence only (max 14 words). Ask at most one question. Do not invent the customer name — use Known details only. If name is unknown, say గారు / sir without a wrong name."
+      : "",
     `Reply with spoken words only.`,
     rich
       ? `When the Instructions say to end the call, speak the required closing line first, then add [END:not_interested], [END:success], [END:callback_requested], or [END:do_not_call] as appropriate.`
@@ -142,7 +150,7 @@ Hard speech rules from the Instructions (never break these):
 
   const prior = (history || [])
     .filter((m) => m.role === "user" || m.role === "assistant")
-    .slice(-12)
+    .slice(voiceStream ? -8 : -12)
     .map((m) => ({ role: m.role, content: m.text }));
 
   const last = prior.at(-1);
@@ -381,6 +389,51 @@ async function completeWithTools({ agent, call, history, userText, slots, llm, k
   return parsed;
 }
 
+function cannedVoiceTurn({ agent, history, userText, slots }) {
+  const usersBefore = (history || []).filter((m) => m.role === "user").length;
+  // history already includes the just-attached user turn in stream endpoint
+  const turn = Math.max(0, usersBefore);
+  const text = String(userText || "").trim();
+  const lower = text.toLowerCase();
+  const name = String(slots?.customer_name || slots?.name || "").trim();
+  const honorific = name ? `${name} గారు` : "గారు";
+  // Allow canned for first user reply after greeting (turn === 1 once attached).
+  if (turn > 2) return null;
+
+  if (/(not interested|no thanks|don't call|do not call|వద్దు|అక్కర్లేదు|interested కాదు)/i.test(lower)
+    || /नहीं|रुचि नहीं|मत करो/.test(text)) {
+    return { text: "సరే అండి.", endCall: true, disposition: "not_interested" };
+  }
+  if (/^(yes|yeah|yep|ok|okay|sure|haan|हां|जी|అవును|చెప్పండి|మాట్లాడొచ్చు|మాట్లాడవచ్చు)\b/i.test(text)
+    || /^(yes|ok|okay|sure|అవును)([,.!\s]|$)/i.test(text)) {
+    const lang = getLanguage(agent?.language).code;
+    if (lang === "hi-IN") {
+      return {
+        text: name
+          ? `${name} जी, क्वालिटी के लिए यह कॉल रिकॉर्ड हो रही है। आपकी graduation किस साल पूरी हुई?`
+          : "क्वालिटी के लिए यह कॉल रिकॉर्ड हो रही है। आपकी graduation किस साल पूरी हुई?",
+        endCall: false,
+        disposition: null,
+      };
+    }
+    if (lang === "en-IN") {
+      return {
+        text: name
+          ? `${name}, this call is recorded for quality. Which year did you complete your graduation?`
+          : "This call is recorded for quality. Which year did you complete your graduation?",
+        endCall: false,
+        disposition: null,
+      };
+    }
+    return {
+      text: `${honorific}, quality కోసం ఈ call record అవుతోంది. మీ graduation ఏ yearలో complete అయింది?`,
+      endCall: false,
+      disposition: null,
+    };
+  }
+  return null;
+}
+
 function defaultEndLine(disposition, agent) {
   // Priya/MLC endings stay Telugu exactly as written in Instructions, even mid-Hindi call.
   const rich = Array.isArray(agent?.instructionSections) && agent.instructionSections.length > 0;
@@ -398,13 +451,15 @@ function defaultEndLine(disposition, agent) {
   return "Okay.";
 }
 
-async function chatCompletion(llm, { agent, messages, tools, stream }) {
+async function chatCompletion(llm, { agent, messages, tools, stream, maxTokens }) {
+  const rich = Array.isArray(agent?.instructionSections) && agent.instructionSections.length;
+  const defaultMax = stream
+    ? rich ? 70 : 55
+    : rich ? 220 : getLanguage(agent?.language).code === "en-IN" ? 90 : 140;
   const payload = {
     model: llm.model,
     temperature: Number(agent?.callSettings?.temperature ?? 0.35),
-    max_tokens: Array.isArray(agent?.instructionSections) && agent.instructionSections.length
-      ? 220
-      : getLanguage(agent?.language).code === "en-IN" ? 90 : 140,
+    max_tokens: Number(maxTokens) || defaultMax,
     stream: Boolean(stream),
     messages,
   };
@@ -450,6 +505,96 @@ export async function* streamModelTokens({ agent, history, userText, slots, llm,
       } catch {
         /* ignore keepalives */
       }
+    }
+  }
+}
+
+/**
+ * Stream a voice-oriented reply token-by-token (no mid-turn tools — keeps TTFA low).
+ * Falls back to the full tool-capable path if streaming fails.
+ */
+export async function streamReply({ agent, call, userText, knowledge = "", onToken }) {
+  followCustomerLanguage(call, agent, userText);
+  const speaking = { ...withSpokenLanguage(agent, call), _voiceStream: true };
+  const history = call.messages || [];
+  const customerName = String(
+    call?.gathered?.customer_name
+      || call?.customer?.customer_name
+      || call?.customer?.name
+      || ""
+  ).trim();
+  const slots = {
+    ...(call.gathered || {}),
+    ...extractSlots(history, userText),
+    ...(customerName && !/^(guest|test customer|caller)$/i.test(customerName)
+      ? { customer_name: customerName, name: customerName }
+      : {}),
+  };
+
+  // Hybrid voice: known first-turn affirm/refuse without waiting on the LLM.
+  const canned = cannedVoiceTurn({ agent: speaking, history, userText, slots });
+  if (canned) {
+    if (canned.text) onToken?.(canned.text);
+    return { ...canned, slots, provider: "canned", model: null };
+  }
+
+  const settings = await getAiSettings();
+  const llm = resolveLlmConfig(speaking, settings);
+
+  if (!llm) {
+    const local = localReply({ agent: speaking, history, userText, slots });
+    if (local.text) onToken?.(local.text);
+    return { ...local, slots, provider: "local", model: null };
+  }
+
+  try {
+    let full = "";
+    for await (const token of streamModelTokens({
+      agent: speaking,
+      history,
+      userText,
+      slots,
+      llm,
+      knowledge,
+    })) {
+      full += token;
+      onToken?.(token);
+    }
+    if (!full.trim()) {
+      const local = localReply({ agent: speaking, history, userText, slots });
+      if (local.text) onToken?.(local.text);
+      return { ...local, slots, provider: "local", model: null };
+    }
+    return {
+      ...guardEarlyHangup(parseSpoken(full), call),
+      slots,
+      provider: llm.provider,
+      model: llm.model,
+    };
+  } catch (error) {
+    console.warn(`${llm.provider} stream fallback:`, error.message);
+    try {
+      const result = await completeWithTools({
+        agent: speaking,
+        call,
+        history,
+        userText,
+        slots,
+        llm,
+        knowledge,
+      });
+      if (result.text) onToken?.(result.text);
+      return { ...guardEarlyHangup(result, call), slots, provider: llm.provider, model: llm.model };
+    } catch (retryError) {
+      const local = localReply({ agent: speaking, history, userText, slots });
+      if (local.text) onToken?.(local.text);
+      return {
+        ...local,
+        slots,
+        provider: "local",
+        model: null,
+        llmError: retryError.message || error.message,
+      };
     }
   }
 }

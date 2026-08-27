@@ -9,7 +9,7 @@ import { GeniePanel } from "../components/GeniePanel.jsx";
 import { compileInstructions, resolveInstructionSections, splitInstructionText } from "../lib/instructionPacks.js";
 import { callSettings } from "../lib/builder.js";
 import { languageLabel } from "../lib/languages.js";
-import { loadVoices, pickVoice, speakText, playAudio, stopAudio, startAmbient, stopAmbient, voicesForLang, spokenForTts, isNoiseTranscript } from "../lib/voice.js";
+import { loadVoices, pickVoice, speakText, playAudio, stopAudio, stopAmbient, voicesForLang, spokenForTts, isNoiseTranscript, pullSpeakable, createSpeechQueue, analyserRms, rmsFromDb } from "../lib/voice.js";
 
 function delay(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
@@ -116,6 +116,10 @@ export default function AgentStudio() {
   const nudgeIndexRef = useRef(0);
   const nudgeTimerRef = useRef(null);
   const quietSinceRef = useRef(0);
+  const speechQueueRef = useRef(null);
+  const speakAbortRef = useRef(false);
+  const bargeWatchRef = useRef(null);
+  const ttsPrepRef = useRef(new Map());
   const [tab, setTab] = useState(() => {
     const requested = searchParams.get("tab");
     if (requested && RAIL.some((item) => item.id === requested)) return requested;
@@ -143,7 +147,11 @@ export default function AgentStudio() {
     });
     return () => {
       wantListenRef.current = false;
+      speakAbortRef.current = true;
+      speechQueueRef.current?.clear();
       stopListening();
+      stopBargeWatch();
+      stopAudio();
       window.speechSynthesis?.cancel();
     };
   }, [id]);
@@ -269,11 +277,14 @@ export default function AgentStudio() {
       channel,
       language: agent?.language,
       customer: {
-        name: defaults.customer_name || defaults.caller_name || "Test customer",
+        name: defaults.customer_name || defaults.caller_name || "Ravi",
         phone: "+910000000000",
         ...defaults,
       },
-      variables: defaults,
+      variables: {
+        ...defaults,
+        customer_name: defaults.customer_name || defaults.caller_name || "Ravi",
+      },
     });
     callRef.current = next;
     setCall(next);
@@ -299,10 +310,12 @@ export default function AgentStudio() {
     }
     sendingRef.current = true;
     wantListenRef.current = false;
+    speakAbortRef.current = false;
     clearTimeout(silenceRef.current);
     clearNudgeTimer();
     nudgeIndexRef.current = 0;
     stopListening();
+    stopBargeWatch();
     setDraft("");
     transcriptRef.current = "";
     heardRef.current = "";
@@ -312,15 +325,52 @@ export default function AgentStudio() {
     let nextCall = null;
     try {
       if (modeRef.current === "voice") {
+        const queue = createSpeechQueue({
+          play: (chunk) => speakChunk(chunk),
+          onStart: () => {
+            speakingRef.current = true;
+            setPhase("speaking");
+            startBargeWatch();
+          },
+          onIdle: () => {},
+          isAborted: () => speakAbortRef.current,
+        });
+        speechQueueRef.current = queue;
+        lastSpokenRef.current = "";
+        ttsPrepRef.current = new Map();
+
+        let display = "";
+        let ttsBuf = "";
+        const feedTts = (piece) => {
+          ttsBuf += piece;
+          while (true) {
+            const { speakable, rest } = pullSpeakable(ttsBuf);
+            if (!speakable) break;
+            ttsBuf = rest;
+            prefetchTts(speakable);
+            queue.push(speakable);
+          }
+        };
+
         nextCall = await api.sendMessageStream(current.id, spoken, {
           source: "voice",
           onDelta: (token) => {
-            setLiveText((prev) => `${prev}${token}`.replace(/\[END:[a-z_]+\]/gi, ""));
+            display += token;
+            setLiveText(display.replace(/\[END:[a-z_]+\]/gi, ""));
+            feedTts(token);
           },
         });
         if (!nextCall) {
           nextCall = await api.sendMessage(current.id, spoken, "voice");
+          const last = [...(nextCall?.messages || [])].reverse().find((m) => m.role === "assistant");
+          if (last?.text) feedTts(last.text);
         }
+        const { speakable, rest } = pullSpeakable(ttsBuf, { force: true });
+        if (speakable || rest) queue.push(speakable || rest);
+        await queue.drain();
+        stopBargeWatch();
+        speakingRef.current = false;
+        speechQueueRef.current = null;
       } else {
         nextCall = await api.sendMessage(current.id, spoken, "chat");
       }
@@ -328,20 +378,27 @@ export default function AgentStudio() {
       callRef.current = nextCall;
       setCall(nextCall);
       setLiveText("");
-      // Unlock typing/mic before TTS so a hung audio play cannot freeze the call.
       sendingRef.current = false;
       if (modeRef.current === "voice") {
-        const last = [...nextCall.messages].reverse().find((m) => m.role === "assistant");
-        if (last?.text) await speak(last.text);
-        await delay(500);
-        if (isLive(nextCall)) resumeListening();
-        else setPhase("idle");
+        if (speakAbortRef.current) {
+          // User barged in — listening resumes from barge handler / capture.
+          if (isLive(nextCall) && wantListenRef.current) resumeListening();
+          else if (isLive(nextCall)) resumeListening();
+        } else {
+          await delay(350);
+          if (isLive(nextCall)) resumeListening();
+          else setPhase("idle");
+        }
       } else {
         setPhase("idle");
       }
     } catch (err) {
       setError(err.message);
       setPhase("idle");
+      speechQueueRef.current?.clear();
+      speechQueueRef.current = null;
+      speakingRef.current = false;
+      stopBargeWatch();
       if (isLive(callRef.current) && modeRef.current === "voice") resumeListening();
     } finally {
       sendingRef.current = false;
@@ -353,7 +410,6 @@ export default function AgentStudio() {
     wantListenRef.current = true;
     setPhase("listening");
     scheduleNudge();
-    // Defer so any exiting ASR loop finally-block finishes first.
     setTimeout(() => {
       if (!wantListenRef.current || speakingRef.current || sendingRef.current || !isLive()) return;
       if (!asrLoopRef.current && !recognitionRef.current) startRecognition();
@@ -365,7 +421,11 @@ export default function AgentStudio() {
     if (!current) return;
     wantListenRef.current = false;
     stopListening();
+    stopBargeWatch();
+    speakAbortRef.current = true;
+    speechQueueRef.current?.clear();
     window.speechSynthesis?.cancel();
+    stopAudio();
     const next = await api.outcome(current.id, { status, disposition, reason });
     callRef.current = next;
     setCall(next);
@@ -400,6 +460,9 @@ export default function AgentStudio() {
     wantListenRef.current = false;
     clearTimeout(nudgeTimerRef.current);
     stopListening();
+    stopBargeWatch();
+    speakAbortRef.current = true;
+    speechQueueRef.current?.clear();
     speakingRef.current = false;
     stopAudio();
     stopAmbient();
@@ -445,62 +508,183 @@ export default function AgentStudio() {
     }, waitMs);
   }
 
-  async function speak(text) {
-    wantListenRef.current = false;
-    clearNudgeTimer();
-    stopListening();
+  function studioTtsPayload(text) {
+    const spokenLang = callRef.current?.language || agentRef.current?.language || "en-IN";
+    const settings = callSettings(agentRef.current);
+    return {
+      text,
+      agentId: agentRef.current?.id,
+      ttsProvider: agentRef.current?.ttsProvider,
+      ttsVoice: agentRef.current?.ttsVoice,
+      ttsModel: agentRef.current?.ttsModel,
+      language: spokenLang,
+      source: "studio",
+      skipAmbient: true,
+      callSettings: { ...settings, backgroundSound: "off" },
+    };
+  }
+
+  function prefetchTts(text) {
+    const display = String(text || "").replace(/\[END:[a-z_]+\]/gi, "").trim();
+    if (!display) return null;
+    const ttsProvider = agentRef.current?.ttsProvider || "browser";
+    if (ttsProvider === "browser") return null;
+    const key = display;
+    if (!ttsPrepRef.current.has(key)) {
+      ttsPrepRef.current.set(
+        key,
+        api.speak(studioTtsPayload(display)).catch((err) => {
+          ttsPrepRef.current.delete(key);
+          throw err;
+        })
+      );
+    }
+    return ttsPrepRef.current.get(key);
+  }
+
+  async function speakChunk(text) {
+    if (speakAbortRef.current) return;
     const display = String(text || "").replace(/\[END:[a-z_]+\]/gi, "").trim();
     const clean = spokenForTts(display);
     if (!clean) return;
-    lastSpokenRef.current = display;
-    speakingRef.current = true;
-    setPhase("speaking");
+    lastSpokenRef.current = `${lastSpokenRef.current} ${display}`.trim();
     const spokenLang = callRef.current?.language || agentRef.current?.language || "en-IN";
     const ttsProvider = agentRef.current?.ttsProvider || "browser";
     const settings = callSettings(agentRef.current);
-    const useClientAmbient = settings.backgroundSound === "quiet_office" && ttsProvider === "browser";
-    try {
-      if (useClientAmbient) {
-        startAmbient("/api/ambient/quiet-office", settings.backgroundVolume ?? 0.12);
-      }
-      if (ttsProvider !== "browser") {
-        try {
-          const clip = await Promise.race([
-            api.speak({
-              text: display,
-              agentId: agentRef.current?.id,
-              ttsProvider,
-              ttsVoice: agentRef.current?.ttsVoice,
-              ttsModel: agentRef.current?.ttsModel,
-              language: spokenLang,
-              callSettings: agentRef.current?.callSettings,
-            }),
-            delay(18000).then(() => Promise.reject(new Error("Voice timed out"))),
-          ]);
-          if (clip?.provider === "browser" || !clip?.audioUrl) {
-            throw new Error("Selected voice is not connected. Add the API key in Settings.");
-          }
-          await Promise.race([
-            playAudio(clip.audioUrl),
-            delay(26000),
-          ]);
-        } catch (err) {
-          setError(err.message || "Selected voice failed. Check Settings for the provider key.");
+    if (ttsProvider !== "browser") {
+      try {
+        const pending = prefetchTts(display) || api.speak(studioTtsPayload(display));
+        const clip = await Promise.race([
+          pending,
+          delay(12000).then(() => Promise.reject(new Error("Voice timed out"))),
+        ]);
+        if (speakAbortRef.current) return;
+        if (clip?.provider === "browser" || !clip?.audioUrl) {
+          throw new Error("Selected voice is not connected. Add the API key in Settings.");
         }
-      } else {
-        await speakText(clean, {
-          voice: voiceRef.current,
-          lang: spokenLang,
-          rate: Number(settings.speakingSpeed ?? 1),
-          pitch: 1 + Number(settings.pitch || 0),
-          cancel: true,
-        });
+        await Promise.race([playAudio(clip.audioUrl), delay(20000)]);
+      } catch (err) {
+        if (!speakAbortRef.current) {
+          await speakText(clean, {
+            voice: voiceRef.current,
+            lang: spokenLang,
+            rate: Number(settings.speakingSpeed ?? 1),
+            pitch: 1 + Number(settings.pitch || 0),
+            cancel: false,
+          });
+        }
+        if (err?.message && !speakAbortRef.current && !/timed out/i.test(err.message)) {
+          setError(err.message);
+        }
       }
-    } finally {
-      speakingRef.current = false;
-      ignoreUntilRef.current = Date.now() + 600;
-      if (useClientAmbient) stopAmbient();
+      return;
     }
+    await speakText(clean, {
+      voice: voiceRef.current,
+      lang: spokenLang,
+      rate: Number(settings.speakingSpeed ?? 1),
+      pitch: 1 + Number(settings.pitch || 0),
+      cancel: false,
+    });
+  }
+
+  async function speak(text) {
+    wantListenRef.current = false;
+    speakAbortRef.current = false;
+    clearNudgeTimer();
+    stopListening();
+    const display = String(text || "").replace(/\[END:[a-z_]+\]/gi, "").trim();
+    if (!display) return;
+    lastSpokenRef.current = display;
+    speakingRef.current = true;
+    setPhase("speaking");
+    try {
+      startBargeWatch();
+      const queue = createSpeechQueue({
+        play: (chunk) => speakChunk(chunk),
+        isAborted: () => speakAbortRef.current,
+      });
+      speechQueueRef.current = queue;
+      let buf = display;
+      while (true) {
+        const { speakable, rest } = pullSpeakable(buf);
+        if (!speakable) break;
+        prefetchTts(speakable);
+        queue.push(speakable);
+        buf = rest;
+      }
+      if (buf.trim()) {
+        prefetchTts(buf.trim());
+        queue.push(buf.trim());
+      }
+      await queue.drain();
+    } finally {
+      stopBargeWatch();
+      speakingRef.current = false;
+      speechQueueRef.current = null;
+      ignoreUntilRef.current = Date.now() + 400;
+    }
+  }
+
+  function stopBargeWatch() {
+    const watch = bargeWatchRef.current;
+    bargeWatchRef.current = null;
+    if (!watch) return;
+    clearInterval(watch.timer);
+    watch.stream?.getTracks().forEach((track) => track.stop());
+    try {
+      watch.ctx?.close();
+    } catch {
+      /* ignore */
+    }
+  }
+
+  function startBargeWatch() {
+    stopBargeWatch();
+    const settings = callSettings(agentRef.current);
+    if (!settings.allowInterrupt || modeRef.current !== "voice") return;
+    if (!navigator.mediaDevices?.getUserMedia) return;
+
+    const threshold = rmsFromDb(settings.volumeThresholdDb);
+    let speechFrames = 0;
+    navigator.mediaDevices.getUserMedia({ audio: true }).then((stream) => {
+      if (!speakingRef.current && !sendingRef.current) {
+        stream.getTracks().forEach((t) => t.stop());
+        return;
+      }
+      const ctx = new (window.AudioContext || window.webkitAudioContext)();
+      const source = ctx.createMediaStreamSource(stream);
+      const analyser = ctx.createAnalyser();
+      analyser.fftSize = 512;
+      source.connect(analyser);
+      const buf = new Uint8Array(analyser.fftSize);
+      const timer = setInterval(() => {
+        if (speakAbortRef.current || (!speakingRef.current && !speechQueueRef.current?.busy)) {
+          stopBargeWatch();
+          return;
+        }
+        if (Date.now() < ignoreUntilRef.current) {
+          speechFrames = 0;
+          return;
+        }
+        const level = analyserRms(analyser, buf);
+        if (level >= threshold) {
+          speechFrames += 1;
+          if (speechFrames >= 4) {
+            speakAbortRef.current = true;
+            speechQueueRef.current?.clear();
+            stopAudio();
+            window.speechSynthesis?.cancel();
+            speakingRef.current = false;
+            stopBargeWatch();
+            ignoreUntilRef.current = Date.now() + 200;
+          }
+        } else {
+          speechFrames = 0;
+        }
+      }, 50);
+      bargeWatchRef.current = { timer, stream, ctx };
+    }).catch(() => {});
   }
 
   function stopListening() {
@@ -533,8 +717,19 @@ export default function AgentStudio() {
     const loopId = (asrGenerationRef.current += 1);
     setPhase("listening");
     let stream;
+    let audioCtx;
     try {
       stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+      audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+      const source = audioCtx.createMediaStreamSource(stream);
+      const analyser = audioCtx.createAnalyser();
+      analyser.fftSize = 512;
+      source.connect(analyser);
+      const samples = new Uint8Array(analyser.fftSize);
+      const settings = () => callSettings(agentRef.current);
+      const threshold = () => rmsFromDb(settings().volumeThresholdDb);
+      const silenceMs = () => Math.max(280, (11 - Number(settings().eagerness || 7)) * 70);
+
       while (
         asrLoopRef.current &&
         asrGenerationRef.current === loopId &&
@@ -543,21 +738,55 @@ export default function AgentStudio() {
         !sendingRef.current &&
         isLive()
       ) {
+        // Wait for speech to start
+        let heardSpeech = false;
+        const waitStart = Date.now();
+        while (
+          asrLoopRef.current &&
+          asrGenerationRef.current === loopId &&
+          wantListenRef.current &&
+          !speakingRef.current &&
+          !sendingRef.current &&
+          Date.now() - waitStart < 60000
+        ) {
+          if (Date.now() < ignoreUntilRef.current) {
+            await delay(40);
+            continue;
+          }
+          if (analyserRms(analyser, samples) >= threshold()) {
+            heardSpeech = true;
+            break;
+          }
+          await delay(40);
+        }
+        if (!heardSpeech || !asrLoopRef.current || speakingRef.current || sendingRef.current) continue;
+
         const chunks = [];
         const media = new MediaRecorder(stream);
         media.ondataavailable = (event) => {
           if (event.data.size) chunks.push(event.data);
         };
-        media.start();
-        await delay(3200);
+        media.start(250);
+        const utterStart = Date.now();
+        let lastLoud = Date.now();
+        while (asrLoopRef.current && asrGenerationRef.current === loopId && Date.now() - utterStart < 10000) {
+          const level = analyserRms(analyser, samples);
+          if (level >= threshold() * 0.85) lastLoud = Date.now();
+          if (Date.now() - lastLoud >= silenceMs() && Date.now() - utterStart > 400) break;
+          await delay(40);
+        }
         if (media.state === "recording") media.stop();
         await new Promise((resolve) => {
           media.onstop = resolve;
         });
         if (!asrLoopRef.current || asrGenerationRef.current !== loopId || speakingRef.current || sendingRef.current) break;
+
         const blob = new Blob(chunks, { type: "audio/webm" });
-        if (blob.size < 1800) continue;
-        const { transcript } = await api.transcribe(blob, callRef.current?.language || agentRef.current?.language || "en-IN");
+        if (blob.size < 1200) continue;
+        const { transcript } = await api.transcribe(
+          blob,
+          callRef.current?.language || agentRef.current?.language || "en-IN"
+        );
         const spoken = String(transcript || "").trim();
         if (spoken.length >= 2 && !isNoiseTranscript(spoken, lastSpokenRef.current)) {
           heardRef.current = spoken;
@@ -570,8 +799,12 @@ export default function AgentStudio() {
       if (wantListenRef.current && asrGenerationRef.current === loopId) startBrowserRecognition();
       else if (wantListenRef.current) setError(err.message);
     } finally {
-      // Only clear the flag if this loop still owns it (a newer loop may already be running).
       if (asrGenerationRef.current === loopId) asrLoopRef.current = false;
+      try {
+        await audioCtx?.close();
+      } catch {
+        /* ignore */
+      }
       stream?.getTracks().forEach((track) => track.stop());
       if (
         wantListenRef.current &&
@@ -613,7 +846,23 @@ export default function AgentStudio() {
     recognitionRef.current = recognition;
 
     recognition.onresult = (event) => {
-      if (speakingRef.current || sendingRef.current) return;
+      if (speakingRef.current || sendingRef.current) {
+        // Barge-in via browser ASR when agent is speaking
+        if (callSettings(agentRef.current).allowInterrupt && speakingRef.current && Date.now() >= ignoreUntilRef.current) {
+          let interim = "";
+          for (let i = event.resultIndex; i < event.results.length; i += 1) {
+            interim += event.results[i][0].transcript;
+          }
+          if (String(interim || "").trim().length >= 2) {
+            speakAbortRef.current = true;
+            speechQueueRef.current?.clear();
+            stopAudio();
+            window.speechSynthesis?.cancel();
+            speakingRef.current = false;
+          }
+        }
+        return;
+      }
       if (Date.now() < ignoreUntilRef.current) return;
       let finalText = "";
       let interim = "";
@@ -639,7 +888,7 @@ export default function AgentStudio() {
             }
             send(spoken);
           }
-        }, Math.max(400, (11 - Number(agentRef.current?.callSettings?.eagerness || 6)) * 180));
+        }, Math.max(280, (11 - Number(agentRef.current?.callSettings?.eagerness || 7)) * 110));
       }
     };
 

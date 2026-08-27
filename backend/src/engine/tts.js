@@ -101,7 +101,7 @@ async function synthesizeOpenAi({ text, voice, model, apiKey, speed = 1 }) {
   return { buffer: Buffer.from(await response.arrayBuffer()), ext: "mp3" };
 }
 
-export async function synthesizeSpeech({ agent, text, settings, publicBaseUrl = "" }) {
+export async function synthesizeSpeech({ agent, text, settings, publicBaseUrl = "", skipAmbient = false }) {
   const callSettings = agent?.callSettings || {};
   const pronunciations = callSettings.pronunciations || null;
   const pronounced = applyPronunciations(text, agent?.language || "en-IN", pronunciations);
@@ -115,7 +115,7 @@ export async function synthesizeSpeech({ agent, text, settings, publicBaseUrl = 
     return { provider: "browser", text: spoken };
   }
   const { pace, pitch } = voiceDynamics(agent);
-  const withAmbient = ambientEnabled(callSettings);
+  const withAmbient = !skipAmbient && ambientEnabled(callSettings);
   const ambVol = ambientVolume(callSettings);
   let dictId = String(callSettings.sarvamDictId || "").trim();
   if (!dictId && tts.provider === "sarvam" && pronunciationCount(pronunciations) > 0) {

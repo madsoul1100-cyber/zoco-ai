@@ -2,7 +2,7 @@ import cors from "cors";
 import express from "express";
 import multer from "multer";
 import { v4 as uuid } from "uuid";
-import { generateReply } from "./engine/conversation.js";
+import { generateReply, streamReply } from "./engine/conversation.js";
 import { renderGreeting } from "./engine/template.js";
 import { applyOutcome, dashboardStats, DISPOSITIONS } from "./engine/rules.js";
 import { publicProviderCatalog, resolveLlmConfig } from "./engine/providers.js";
@@ -206,6 +206,7 @@ app.post("/api/tts", async (req, res) => {
       text,
       settings: await getAiSettings(),
       publicBaseUrl: "",
+      skipAmbient: Boolean(req.body?.skipAmbient) || req.body?.source === "studio",
     });
     res.json(spoken || { provider: "browser" });
   } catch (error) {
@@ -661,7 +662,9 @@ app.post("/api/calls/:id/messages/stream", async (req, res) => {
   res.setHeader("Cache-Control", "no-cache, no-transform");
   res.setHeader("Connection", "keep-alive");
   res.flushHeaders?.();
-  const emit = (payload) => res.write(`data: ${JSON.stringify(payload)}\n\n`);
+  const emit = (payload) => {
+    if (!res.writableEnded) res.write(`data: ${JSON.stringify(payload)}\n\n`);
+  };
 
   try {
     call.status = "in_progress";
@@ -675,14 +678,19 @@ app.post("/api/calls/:id/messages/stream", async (req, res) => {
     await saveCall(call);
     emit({ type: "user", text: userText });
 
-    const reply = await generateReply({
+    // Skip KB retrieval on short/ack turns — it blocks time-to-first-token.
+    const needsKb = /form\s*18|mlc|register|constituency|graduate|election|ఫారం|ఎన్నిక|జిల్లా|year|డిస్ట్రిక్ట్|voter|ఓటర్/i.test(userText)
+      || userText.length > 48;
+    const knowledge = needsKb
+      ? await knowledgeContextForAgent(agent, userText, { limit: 2, maxChars: 1600 })
+      : "";
+    const reply = await streamReply({
       agent,
       call,
       userText,
-      knowledge: await knowledgeContextForAgent(agent, userText),
-      knowledgeFn: (ag, q) => knowledgeContextForAgent(ag, q),
+      knowledge,
+      onToken: (token) => emit({ type: "delta", text: token }),
     });
-    emit({ type: "delta", text: reply.text || "" });
 
     call.gathered = { ...(call.gathered || {}), ...(reply.slots || {}) };
     call.llm = { provider: reply.provider, model: reply.model || null };
@@ -694,6 +702,15 @@ app.post("/api/calls/:id/messages/stream", async (req, res) => {
       audioOffsetMs: null,
       provider: reply.provider,
     }, source);
+    if (reply.llmError) {
+      await attachTurn(call, {
+        id: `msg_${uuid().slice(0, 8)}`,
+        role: "system",
+        text: `LLM fallback: ${reply.llmError}`,
+        timestamp: new Date().toISOString(),
+        audioOffsetMs: null,
+      }, source);
+    }
 
     let next = call;
     if (reply.endCall) {
