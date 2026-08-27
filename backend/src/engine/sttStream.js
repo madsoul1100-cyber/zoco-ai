@@ -7,8 +7,9 @@ const SARVAM_REALTIME = "wss://api.sarvam.ai/speech-to-text-realtime/ws";
 
 function silenceMsFromEagerness(eagerness) {
   const value = Number(eagerness);
-  if (!Number.isFinite(value)) return 450;
-  return Math.max(280, Math.min(900, Math.round((11 - value) * 70)));
+  if (!Number.isFinite(value)) return 550;
+  // Longer floor so mid-phrase pauses don't drop the start of an utterance.
+  return Math.max(450, Math.min(1100, Math.round((11 - value) * 85)));
 }
 
 function buildSarvamUrl({ language = "auto", eagerness = 7 } = {}) {
@@ -16,13 +17,14 @@ function buildSarvamUrl({ language = "auto", eagerness = 7 } = {}) {
     language_code: language === "auto" ? "auto" : sarvamTtsLanguage(language),
     model: "saaras:v3-realtime",
     stream_type: "fast",
-    mode: "transcribe",
+    // Keep English in Latin + Hindi/Telugu in native script (avoids "बट" / "आई गेस").
+    mode: "codemix",
     endpointing: "vad",
     encoding: "linear16",
     sample_rate: "16000",
-    threshold: "0.35",
+    threshold: "0.30",
     silence_duration_ms: String(silenceMsFromEagerness(eagerness)),
-    min_speech_duration_ms: "200",
+    min_speech_duration_ms: "120",
   });
   return `${SARVAM_REALTIME}?${params.toString()}`;
 }

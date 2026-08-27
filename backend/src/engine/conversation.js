@@ -117,10 +117,13 @@ Hard speech rules from the Instructions (never break these):
 - Never say ధన్యవాదాలు. Use English "Thank you" only for genuine thanks, never for giving a name/district/year.
 - Always speak the English words "Form 18". Never say ఫారం, ఫార్మ్ or ఫార్మే.
 - Default to one short spoken sentence; two only when needed before one question.
-- On refusal / not interested / wrong person / opt-out: speak a short closing in the ACTIVE language (English goodbye / Hindi ठीक है, धन्यवाद / Telugu సరే అండి), then end.
-- After a language switch, continue the Graduate MLC outbound pitch. Never ask generic how-can-I-help.
+- On refusal / not interested / out-of-area / wrong person / opt-out: acknowledge what they said, speak a short closing in the ACTIVE language, then end with the correct [END:...] tag.
+- Never mark wrong_person unless they clearly say a different person answered or the number is wrong.
+- If they live outside the constituency or say this is not for them, end as not_interested — do not keep pitching.
+- After a language switch, answer them in that language. Never ask generic how-can-I-help.
 - When the active language is Hindi, speak only Devanagari Hindi until another language is requested.
-- When the active language is English, speak natural Indian English only until another language is requested.`
+- When the active language is English, speak natural Indian English only until another language is requested.
+- Never invent DOB, KYC, bank, or address-collection questions — stay on Graduate MLC awareness only.`
       : `You work for the business in the use case. Sound like a real agency person, not a generic assistant. One or two short sentences. Never more than 25 words.`,
     languageInstruction(agent),
     `Use case: ${agent.useCase}. Goal: ${agent.successCriteria}.`,
@@ -139,8 +142,11 @@ Hard speech rules from the Instructions (never break these):
     knowledge ? `Use this knowledge base only when the customer asks something factual. Never read it out as a list. Knowledge:\n${knowledge}` : "",
     slots && Object.keys(slots).length ? `Known details: ${JSON.stringify(slots)}` : "",
     voiceStream
-      ? "VOICE STREAM LATENCY: Reply in ONE short spoken sentence only (max 14 words). Ask at most one question. Do not invent the customer name — use Known details only. If name is unknown, say గారు / sir without a wrong name."
+      ? "VOICE STREAM: At most TWO short spoken sentences. Complete your point in this turn — never stop at only okay / ठीक है / जी हाँ / हाँ. After a language switch, confirm the language AND say why you called (Graduate MLC) and ask for ~30 seconds in the SAME turn. If ending, close fully then [END:...]. If continuing, finish with one clear question."
       : "",
+    `LISTEN FIRST (hard rule): The customer's latest message is the only thing you must answer on this turn. If they ask who you are, why you called, what this is about, what you want to say next, or ask to change language, answer that clearly before any script question (graduation year, Form 18, district, etc.). Never ignore their words to push the outbound pitch. Never invent that they agreed to something they did not say.`,
+    `COMPLETE THE TURN (hard rule): Do not leave a dangling acknowledgement. Every reply must either (1) fully close the call with the correct ending line + [END:...], or (2) deliver the next useful point and end with one question. Never say only “okay / ठीक है / धन्यवाद” and wait.`,
+    `SOUND HUMAN (hard rule): Speak like a real person on a phone — warm, brief, conversational. Keep natural punctuation (?, !, commas, ।) so TTS can breathe and ask questions with real intonation. Avoid stiff IVR phrasing.`,
     `Reply with spoken words only.`,
     rich
       ? `When the Instructions say to end the call, speak the required closing line first, then add [END:not_interested], [END:success], [END:callback_requested], or [END:do_not_call] as appropriate.`
@@ -168,14 +174,14 @@ Hard speech rules from the Instructions (never break these):
       messages.push({
         role: "system",
         content:
-          "LANGUAGE LOCK for this turn: speak natural Hindi only in Devanagari. Do not mix Telugu script into conversational lines. Continue the Graduate MLC outbound pitch (recording / separate list / graduation / Form 18 as needed). Never ask generic how can I help. If Ending applies, close in Hindi (ठीक है, धन्यवाद) then [END:...]. Prefer the Instructions over any generic brevity rule.",
+          "LANGUAGE LOCK for this turn: speak natural Hindi only in Devanagari (English product words like Form 18 / Graduate MLC stay in English). Do not mix Telugu script. Answer the caller's latest words first — if Ending applies (not interested, out of area, wrong person), close in Hindi (ठीक है, धन्यवाद) then [END:not_interested] or [END:wrong_person] correctly. Never ask DOB/address/KYC. Prefer the Instructions over any generic brevity rule.",
       });
     } else if (code === "en-IN") {
       messages.push({ role: "system", content: languageLock(agent) });
     } else {
       messages.push({
         role: "system",
-        content: `LANGUAGE LOCK for this turn: speak ${lang.label} primarily in the ${lang.native} script unless the caller clearly switched. Keep [END:...] tags in ASCII. Prefer the Instructions over any generic brevity rule. Closing lines must match this active language.`,
+        content: `LANGUAGE LOCK for this turn: speak ${lang.label} primarily in the ${lang.native} script unless the caller clearly switched. Keep [END:...] tags in ASCII. Answer the caller's latest words first. Closing lines must match this active language. Never ask DOB/address/KYC.`,
       });
     }
   }
@@ -273,6 +279,113 @@ export function guardEarlyHangup(parsed, call) {
   return parsed;
 }
 
+/** Detect clear caller intents that must override the script. */
+export function detectCallerIntent(userText) {
+  const text = String(userText || "").trim();
+  const lower = text.toLowerCase();
+  if (!text) return { wrongPerson: false, outOfArea: false, notInterested: false, doNotCall: false };
+
+  const wrongPerson = /wrong (person|number)|गलत (नंबर|व्यक्ति|आदमी)|వేరే (వ్యక్తి|నెంబర్|వాళ్ళు)|not (me|him|her)\b|मेरा नाम नहीं|నేను కాదు|wrong (log|banda)/i.test(text);
+  const outsideCity = /\b(chandigarh|mohali|delhi|mumbai|punjab|haryana|bangalore|bengaluru|kolkata|jaipur|pune)\b/i.test(text)
+    || /चंडीगढ़|चण्डीगढ़|मोहाली|दिल्ली|मुंबई|पंजाब|हरियाणा/.test(text);
+  const declineArea = /not for me|won'?t be for me|mere liye.{0,40}(nahi|nahin|नहीं)|मेरे लिए.{0,40}(नहीं|ना)|नहीं होगा|ye mere liye|यह मेरे लिए|out of (area|state|constituency)|दूसरे (शहर|राज्य)|different (city|state)|इधर का नहीं|उधर (साइड|side)|mere area|hyderabad.{0,24}(nahi|नहीं)|constituency.{0,24}(nahi|नहीं)/i.test(text);
+  const outOfArea = declineArea || (outsideCity && /(nahi|nahin|नहीं|not for|won'?t|नहीं होगा|ka nahi|का नहीं)/i.test(text));
+  const doNotCall = /do not call|don't call|dnc|कॉल मत|फोन मत|दोबारा (मत|नहीं)|మళ్లీ call చేయవద్దు/i.test(text);
+  // User asking the agent to continue / explain is NOT a refusal.
+  const wantsContinue = /क्या बात|आगे (बता|बात|क्या)|what (do you|did you|is it)|tell me|बोलना है|बताना चाह|बात करो|आगे करो|kyun call|why (did you|are you) call/i.test(text);
+  const softRefuse = /(मन नहीं|दिल नहीं|रुचि नहीं|दिलचस्पी नहीं|बात नहीं करनी|नहीं करना चाह|interested नहीं|not interested|no thanks|not now|వద్దు|అక్కర్లేదు)/i.test(text);
+  const notInterested = !wrongPerson && !wantsContinue && (
+    doNotCall
+    || softRefuse
+    || /(not interested|no thanks|not now)/i.test(lower)
+  );
+
+  return { wrongPerson, outOfArea, notInterested: notInterested || outOfArea, doNotCall };
+}
+
+function outOfAreaClosing(language) {
+  const code = getLanguage(language).code;
+  if (code === "hi-IN") return "ठीक है, यह आपके क्षेत्र के लिए नहीं है। धन्यवाद।";
+  if (code === "en-IN") return "Okay, this isn't for your area. Thank you, goodbye.";
+  return "సరే అండి, ఇది మీ area కోసం కాదు.";
+}
+
+/** Force correct ending when the caller clearly declined or is out of area. */
+export function intentDrivenReply(agent, userText) {
+  const intent = detectCallerIntent(userText);
+  const lang = getLanguage(agent?.language).code;
+  if (intent.wrongPerson) {
+    return {
+      text: closingLineFor("wrong_person", lang),
+      endCall: true,
+      disposition: "wrong_person",
+    };
+  }
+  if (intent.doNotCall) {
+    return {
+      text: closingLineFor("do_not_call", lang),
+      endCall: true,
+      disposition: "do_not_call",
+    };
+  }
+  if (intent.outOfArea) {
+    return {
+      text: outOfAreaClosing(lang),
+      endCall: true,
+      disposition: "not_interested",
+    };
+  }
+  if (intent.notInterested) {
+    return {
+      text: closingLineFor("not_interested", lang),
+      endCall: true,
+      disposition: "not_interested",
+    };
+  }
+  return null;
+}
+
+/** Fix bad LLM endings (wrong_person misuse, wrong closing language). */
+export function normalizeEndDisposition(parsed, agent, userText) {
+  if (!parsed) return parsed;
+  const intent = detectCallerIntent(userText);
+  const lang = getLanguage(agent?.language).code;
+  let next = { ...parsed };
+
+  if (intent.wrongPerson) {
+    return {
+      text: closingLineFor("wrong_person", lang),
+      endCall: true,
+      disposition: "wrong_person",
+    };
+  }
+  if (intent.outOfArea || intent.notInterested || intent.doNotCall) {
+    const disposition = intent.doNotCall ? "do_not_call" : "not_interested";
+    return {
+      text: intent.outOfArea ? outOfAreaClosing(lang) : closingLineFor(disposition, lang),
+      endCall: true,
+      disposition,
+    };
+  }
+
+  // Never keep wrong_person without a clear identity mismatch.
+  if (next.disposition === "wrong_person" && !intent.wrongPerson) {
+    if (next.endCall) {
+      return {
+        text: closingLineFor("not_interested", lang),
+        endCall: true,
+        disposition: "not_interested",
+      };
+    }
+    next = { ...next, disposition: null, endCall: false };
+  }
+
+  if (next.endCall && next.disposition) {
+    return enforceClosingLine({ ...next, text: next.text || closingLineFor(next.disposition, lang) }, lang);
+  }
+  return next;
+}
+
 export function followCustomerLanguage(call, agent, userText) {
   const settings = agent?.callSettings || {};
   const current = call?.language || agent?.language || "en-IN";
@@ -302,6 +415,10 @@ export async function generateReply({ agent, call, userText, knowledge = "", kno
   const speaking = withSpokenLanguage(agent, call);
   const history = call.messages || [];
   const slots = { ...(call.gathered || {}), ...extractSlots(history, userText) };
+
+  const intent = intentDrivenReply(speaking, userText);
+  if (intent) return { ...intent, slots, provider: "intent", model: null };
+
   const settings = await getAiSettings();
   let llm = resolveLlmConfig(speaking, settings);
 
@@ -317,7 +434,12 @@ export async function generateReply({ agent, call, userText, knowledge = "", kno
         knowledge,
         knowledgeFn,
       });
-      return { ...guardEarlyHangup(result, call), slots, provider: llm.provider, model: llm.model };
+      return {
+        ...normalizeEndDisposition(guardEarlyHangup(result, call), speaking, userText),
+        slots,
+        provider: llm.provider,
+        model: llm.model,
+      };
     } catch (error) {
       console.warn(`${llm.provider} fallback:`, error.message);
       const backup = llm.provider === "openrouter" ? null : fallbackLlmConfig(settings);
@@ -333,7 +455,12 @@ export async function generateReply({ agent, call, userText, knowledge = "", kno
             knowledge,
             knowledgeFn,
           });
-          return { ...guardEarlyHangup(result, call), slots, provider: backup.provider, model: backup.model };
+          return {
+            ...normalizeEndDisposition(guardEarlyHangup(result, call), speaking, userText),
+            slots,
+            provider: backup.provider,
+            model: backup.model,
+          };
         } catch (retryError) {
           console.warn(`${backup.provider} fallback:`, retryError.message);
           return {
@@ -416,31 +543,22 @@ async function completeWithTools({ agent, call, history, userText, slots, llm, k
 
 function cannedVoiceTurn({ agent, history, userText, slots }) {
   const usersBefore = (history || []).filter((m) => m.role === "user").length;
-  // history already includes the just-attached user turn in stream endpoint
   const turn = Math.max(0, usersBefore);
   const text = String(userText || "").trim();
-  const lower = text.toLowerCase();
   const name = String(slots?.customer_name || slots?.name || "").trim();
   const honorific = name ? `${name} గారు` : "గారు";
-  // Only first user reply after greeting.
-  if (turn > 1) return null;
+
+  // Intent endings apply on any turn (not only the first reply).
+  const intent = intentDrivenReply(agent, userText);
+  if (intent) return intent;
 
   // Never treat language-switch / clarification as refusal.
   if (/hindi|english|telugu|हिंदी|हिन्दी|తెలుగు|में बात|लो बात|switch|language|समझ नहीं|samajh/i.test(text)) {
     return null;
   }
 
-  if (
-    /(not interested|no thanks|don't call|do not call|not now|వద్దు|అక్కర్లేదు|interested\s*కాదు)/i.test(lower)
-    || /(रुचि नहीं|दिलचस्पी नहीं|कॉल मत|फोन मत करो|बात नहीं करनी)/.test(text)
-  ) {
-    const lang = getLanguage(agent?.language).code;
-    return {
-      text: closingLineFor("not_interested", lang),
-      endCall: true,
-      disposition: "not_interested",
-    };
-  }
+  // Only first user reply after greeting for short affirmations.
+  if (turn > 1) return null;
 
   // Strict short affirmations only (avoid matching longer questions).
   if (text.length <= 28 && (
@@ -482,7 +600,7 @@ function defaultEndLine(disposition, agent) {
 async function chatCompletion(llm, { agent, messages, tools, stream, maxTokens }) {
   const rich = Array.isArray(agent?.instructionSections) && agent.instructionSections.length;
   const defaultMax = stream
-    ? rich ? 140 : 90
+    ? rich ? 180 : 110
     : rich ? 220 : getLanguage(agent?.language).code === "en-IN" ? 90 : 140;
   const payload = {
     model: llm.model,
@@ -594,7 +712,11 @@ export async function streamReply({ agent, call, userText, knowledge = "", onTok
       return { ...local, slots, provider: "local", model: null };
     }
     return {
-      ...guardEarlyHangup(parseSpoken(full, speaking.language || call?.language), call),
+      ...normalizeEndDisposition(
+        guardEarlyHangup(parseSpoken(full, speaking.language || call?.language), call),
+        speaking,
+        userText
+      ),
       slots,
       provider: llm.provider,
       model: llm.model,
@@ -612,7 +734,12 @@ export async function streamReply({ agent, call, userText, knowledge = "", onTok
         knowledge,
       });
       if (result.text) onToken?.(result.text);
-      return { ...guardEarlyHangup(result, call), slots, provider: llm.provider, model: llm.model };
+      return {
+        ...normalizeEndDisposition(guardEarlyHangup(result, call), speaking, userText),
+        slots,
+        provider: llm.provider,
+        model: llm.model,
+      };
     } catch (retryError) {
       const local = localReply({ agent: speaking, history, userText, slots });
       if (local.text) onToken?.(local.text);

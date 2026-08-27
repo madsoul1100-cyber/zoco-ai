@@ -43,24 +43,45 @@ async function saveClip(id, buffer, ext = "mp3") {
 
 export function voiceDynamics(agent) {
   const settings = agent?.callSettings || {};
-  const pace = Math.min(2, Math.max(0.5, Number(settings.speakingSpeed ?? 1) || 1));
+  // Keep pace locked — varying speed between clips makes it sound like two speakers.
+  let pace = Math.min(2, Math.max(0.5, Number(settings.speakingSpeed ?? 0.95) || 0.95));
+  if (pace > 1.02) pace = 1.02;
   const pitch = Math.min(0.75, Math.max(-0.75, Number(settings.pitch ?? 0) || 0));
-  return { pace, pitch };
+  // Lower temperature = same voice character across sentence clips (high temp = “different person”).
+  const temperature = Math.min(0.85, Math.max(0.2, Number(settings.ttsTemperature ?? 0.55) || 0.55));
+  return { pace, pitch, temperature };
 }
 
 function isSarvamV2(model) {
   return String(model || "").includes("v2") && !String(model || "").includes("v3");
 }
 
-async function synthesizeSarvam({ text, language, voice, model, apiKey, pace = 1, pitch = 0, dictId = "" }) {
+async function synthesizeSarvam({
+  text,
+  language,
+  voice,
+  model,
+  apiKey,
+  pace = 1,
+  pitch = 0,
+  temperature = 0.55,
+  dictId = "",
+  sampleRate = 24000,
+}) {
   const payload = {
     text,
     target_language_code: sarvamTtsLanguage(language),
-    speaker: voice || "shubh",
+    speaker: voice || "priya",
     model: model || "bulbul:v3",
-    pace: Math.min(2, Math.max(0.5, Number(pace) || 1)),
+    pace: Math.min(2, Math.max(0.5, Number(pace) || 0.95)),
+    speech_sample_rate: Number(sampleRate) || 24000,
   };
-  if (isSarvamV2(payload.model)) payload.pitch = pitch;
+  if (isSarvamV2(payload.model)) {
+    payload.pitch = pitch;
+  } else {
+    // Cap expressiveness so consecutive clips stay the same speaker.
+    payload.temperature = Math.min(0.85, Math.max(0.01, Number(temperature) || 0.55));
+  }
   if (dictId && !isSarvamV2(payload.model)) payload.dict_id = dictId;
   const response = await fetch("https://api.sarvam.ai/text-to-speech", {
     method: "POST",
@@ -87,7 +108,7 @@ async function synthesizeOpenAi({ text, voice, model, apiKey, speed = 1 }) {
     method: "POST",
     headers: llmHeaders({ provider: "openai", apiKey }),
     body: JSON.stringify({
-      model: model || "tts-1",
+      model: model || "tts-1-hd",
       voice: voice || "nova",
       input: text,
       response_format: "mp3",
@@ -101,7 +122,14 @@ async function synthesizeOpenAi({ text, voice, model, apiKey, speed = 1 }) {
   return { buffer: Buffer.from(await response.arrayBuffer()), ext: "mp3" };
 }
 
-export async function synthesizeSpeech({ agent, text, settings, publicBaseUrl = "", skipAmbient = false }) {
+export async function synthesizeSpeech({
+  agent,
+  text,
+  settings,
+  publicBaseUrl = "",
+  skipAmbient = false,
+  source = "",
+}) {
   const callSettings = agent?.callSettings || {};
   const pronunciations = callSettings.pronunciations || null;
   const pronounced = applyPronunciations(text, agent?.language || "en-IN", pronunciations);
@@ -114,9 +142,11 @@ export async function synthesizeSpeech({ agent, text, settings, publicBaseUrl = 
     }
     return { provider: "browser", text: spoken };
   }
-  const { pace, pitch } = voiceDynamics(agent);
+  const { pace, pitch, temperature } = voiceDynamics(agent);
   const withAmbient = !skipAmbient && ambientEnabled(callSettings);
   const ambVol = ambientVolume(callSettings);
+  // Studio gets fuller audio; phone can stay 24 kHz.
+  const sampleRate = source === "studio" || skipAmbient ? 48000 : 24000;
   let dictId = String(callSettings.sarvamDictId || "").trim();
   if (!dictId && tts.provider === "sarvam" && pronunciationCount(pronunciations) > 0) {
     try {
@@ -131,7 +161,7 @@ export async function synthesizeSpeech({ agent, text, settings, publicBaseUrl = 
     model: tts.model,
     voice: tts.voice,
     language: tts.language,
-    text: `${spoken}|p${pace}|t${pitch}|d${dictId || "local"}|a${withAmbient ? ambVol : 0}`,
+    text: `${spoken}|p${pace}|t${pitch}|e${temperature}|r${sampleRate}|d${dictId || "local"}|a${withAmbient ? ambVol : 0}`,
   });
   const existing = await getTtsClip(id);
   if (!existing) {
@@ -145,12 +175,14 @@ export async function synthesizeSpeech({ agent, text, settings, publicBaseUrl = 
             apiKey: tts.apiKey,
             pace,
             pitch,
+            temperature,
             dictId,
+            sampleRate,
           })
         : await synthesizeOpenAi({
             text: spoken,
             voice: tts.voice,
-            model: tts.model,
+            model: tts.model || "tts-1-hd",
             apiKey: tts.apiKey,
             speed: pace,
           });

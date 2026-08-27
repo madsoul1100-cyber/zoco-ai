@@ -209,6 +209,7 @@ app.post("/api/tts", async (req, res) => {
       settings: await getAiSettings(),
       publicBaseUrl: "",
       skipAmbient: Boolean(req.body?.skipAmbient) || req.body?.source === "studio",
+      source: String(req.body?.source || ""),
     });
     res.json(spoken || { provider: "browser" });
   } catch (error) {

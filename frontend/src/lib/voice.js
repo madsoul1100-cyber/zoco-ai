@@ -175,29 +175,28 @@ export function splitSentences(buffer) {
 
 /**
  * Pull the next speakable clause from a streaming LLM buffer.
- * Only split on real sentence ends — word-chunk splitting made voice sound broken.
+ * Only split on real sentence ends — comma splits caused each clip to sound like a different voice.
  */
-export function pullSpeakable(buffer, { force = false, minChars = 18 } = {}) {
+export function pullSpeakable(buffer, { force = false } = {}) {
   const text = String(buffer || "");
   if (!text.trim()) return { speakable: null, rest: "" };
   if (force) return { speakable: text.trim(), rest: "" };
 
-  const spaced = text.match(/^([\s\S]*?[.!?…])(?:\s+|$)([\s\S]*)$/u);
-  if (spaced?.[1]?.trim() && spaced[1].trim().length >= 2) {
-    return { speakable: spaced[1].trim(), rest: spaced[2] || "" };
-  }
-
-  const danda = text.match(/^([\s\S]*?[।॥])([\s\S]*)$/u);
-  if (danda?.[1]?.trim() && danda[1].trim().length >= 2) {
-    return { speakable: danda[1].trim(), rest: danda[2] || "" };
-  }
-
-  // Soft split only on a long clause with a comma (keeps TTS from waiting forever).
-  if (text.trim().length >= Math.max(minChars, 42)) {
-    const soft = text.match(/^([\s\S]{18,}?[,;，、])\s+([\s\S]+)$/u);
-    if (soft?.[1]?.trim()) {
-      return { speakable: soft[1].trim(), rest: soft[2] || "" };
+  // Prefer holding a short two-sentence turn in one clip when possible.
+  const ends = [...text.matchAll(/[.!?…।॥]/gu)];
+  if (ends.length >= 1) {
+    const first = ends[0].index + 1;
+    const chunk = text.slice(0, first).trim();
+    const rest = text.slice(first).trimStart();
+    // If the first sentence is very short (ack only), wait for more unless force.
+    if (chunk.length < 12 && rest) {
+      if (ends.length >= 2) {
+        const second = ends[1].index + 1;
+        return { speakable: text.slice(0, second).trim(), rest: text.slice(second).trimStart() };
+      }
+      return { speakable: null, rest: text };
     }
+    if (chunk) return { speakable: chunk, rest };
   }
 
   return { speakable: null, rest: text };
@@ -305,9 +304,10 @@ const NOISE_PHRASE =
 const NOISE_LEFTOVER = /^(point|mark|stop|पॉइंट|प्वाइंट|प्वाइन्ट)?$/i;
 
 export function spokenForTts(text) {
+  // Keep sentence punctuation for natural TTS prosody (pauses / questions).
   return String(text || "")
     .replace(/\[END:[a-z_]+\]/gi, "")
-    .replace(TTS_PUNCT, " ")
+    .replace(/["""''`()[\]{}]/g, " ")
     .replace(/\s+/g, " ")
     .trim();
 }

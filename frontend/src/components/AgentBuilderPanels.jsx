@@ -533,8 +533,24 @@ export function SettingsPanel({
             </button>
           </div>
         </SettingRow>
-        <SettingRow title="Speaking speed" hint="How fast the agent talks. Preview uses this immediately; live calls use it after Finish update.">
+        <SettingRow title="Speaking speed" hint="~0.95–1.0 sounds most natural. Speeds above 1.15 are softened for Sarvam.">
           <RangeControl min={0.5} max={2} step={0.05} suffix="x" value={settings.speakingSpeed} onChange={(speakingSpeed) => set({ speakingSpeed })} />
+        </SettingRow>
+        <SettingRow
+          title="Voice expressiveness"
+          hint={
+            sarvamV3
+              ? "Keep ~0.5–0.6 so every sentence sounds like the same person. Higher values change tone between clips."
+              : "Applies when using Sarvam Bulbul v3."
+          }
+        >
+          <RangeControl
+            min={0.2}
+            max={0.85}
+            step={0.05}
+            value={settings.ttsTemperature ?? 0.55}
+            onChange={(ttsTemperature) => set({ ttsTemperature })}
+          />
         </SettingRow>
         <SettingRow
           title="Pitch"

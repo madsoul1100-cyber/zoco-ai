@@ -123,6 +123,9 @@ export default function AgentStudio() {
   const bargeWatchRef = useRef(null);
   const ttsPrepRef = useRef(new Map());
   const streamSttRef = useRef(null);
+  const pendingUserRef = useRef("");
+  const streamAbortCtrlRef = useRef(null);
+  const coalesceTimerRef = useRef(null);
   const [tab, setTab] = useState(() => {
     const requested = searchParams.get("tab");
     if (requested && RAIL.some((item) => item.id === requested)) return requested;
@@ -244,9 +247,14 @@ export default function AgentStudio() {
     setCall(connected);
     const greeting =
       [...connected.messages].reverse().find((m) => m.role === "assistant")?.text || agent.greeting;
-    await speak(greeting);
-    await delay(700);
+    // Listen during the greeting so barge-in captures the full interrupt (not only the tail).
     if (isLive(connected)) startPersistentListen();
+    await speak(greeting);
+    if (isLive(connected) && !pendingUserRef.current) {
+      wantListenRef.current = true;
+      setPhase("listening");
+      scheduleNudge();
+    }
   }
 
   useEffect(() => {
@@ -302,6 +310,71 @@ export default function AgentStudio() {
     await goLive(next);
   }
 
+  function interruptSpeaking() {
+    if (!speakingRef.current && !speechQueueRef.current?.busy) return false;
+    speakAbortRef.current = true;
+    try {
+      streamAbortCtrlRef.current?.abort();
+    } catch {
+      /* ignore */
+    }
+    speechQueueRef.current?.clear();
+    stopAudio();
+    window.speechSynthesis?.cancel();
+    speakingRef.current = false;
+    stopBargeWatch();
+    wantListenRef.current = true;
+    setPhase("listening");
+    ignoreUntilRef.current = Date.now() + 200;
+    return true;
+  }
+
+  function coalesceMs() {
+    const eagerness = Number(callSettings(agentRef.current).eagerness || 7);
+    return Math.max(420, (11 - eagerness) * 90);
+  }
+
+  function flushCoalescedUtterance() {
+    clearTimeout(coalesceTimerRef.current);
+    coalesceTimerRef.current = null;
+    const spoken = (transcriptRef.current || heardRef.current || "").trim();
+    transcriptRef.current = "";
+    if (spoken.length < 2) return;
+    if (isNoiseTranscript(spoken, lastSpokenRef.current)) {
+      heardRef.current = "";
+      setHeardText("");
+      return;
+    }
+    void acceptUserSpeech(spoken);
+  }
+
+  function scheduleCoalesceFlush() {
+    clearTimeout(coalesceTimerRef.current);
+    coalesceTimerRef.current = setTimeout(() => {
+      flushCoalescedUtterance();
+    }, coalesceMs());
+  }
+
+  async function acceptUserSpeech(text, { immediate = false } = {}) {
+    const spoken = String(text || "").trim();
+    if (!spoken) return;
+    if (speakingRef.current || speechQueueRef.current?.busy) {
+      interruptSpeaking();
+    }
+    if (sendingRef.current) {
+      pendingUserRef.current = spoken;
+      heardRef.current = spoken;
+      setHeardText(spoken);
+      setPendingUserText(spoken);
+      return;
+    }
+    if (immediate) {
+      clearTimeout(coalesceTimerRef.current);
+      transcriptRef.current = "";
+    }
+    await send(spoken);
+  }
+
   async function send(text = draft) {
     const current = callRef.current;
     const spoken = String(text || "").trim();
@@ -313,12 +386,16 @@ export default function AgentStudio() {
       return;
     }
     sendingRef.current = true;
-    wantListenRef.current = false;
+    pendingUserRef.current = "";
     speakAbortRef.current = false;
     clearTimeout(silenceRef.current);
+    clearTimeout(coalesceTimerRef.current);
     clearNudgeTimer();
     nudgeIndexRef.current = 0;
-    stopListening();
+    // Keep streaming STT alive during think/speak so barge-in hears the full interrupt.
+    if (modeRef.current !== "voice" || !streamSttRef.current) {
+      stopListening();
+    }
     stopBargeWatch();
     setDraft("");
     transcriptRef.current = "";
@@ -328,14 +405,18 @@ export default function AgentStudio() {
     setLiveText("");
     setPhase("thinking");
     let nextCall = null;
+    const streamCtrl = new AbortController();
+    streamAbortCtrlRef.current = streamCtrl;
     try {
       if (modeRef.current === "voice") {
+        wantListenRef.current = true;
         const queue = createSpeechQueue({
           play: (chunk) => speakChunk(chunk),
           onStart: () => {
             speakingRef.current = true;
             setPhase("speaking");
-            ignoreUntilRef.current = Date.now() + 1200;
+            // Short protect window — long enough to skip TTS echo, short enough to interrupt greeting.
+            ignoreUntilRef.current = Date.now() + 550;
             startBargeWatch();
           },
           onIdle: () => {},
@@ -348,6 +429,7 @@ export default function AgentStudio() {
         let display = "";
         let ttsBuf = "";
         const feedTts = (piece) => {
+          if (speakAbortRef.current) return;
           ttsBuf += piece;
           while (true) {
             const { speakable, rest } = pullSpeakable(ttsBuf);
@@ -360,19 +442,23 @@ export default function AgentStudio() {
 
         nextCall = await api.sendMessageStream(current.id, spoken, {
           source: "voice",
+          signal: streamCtrl.signal,
           onDelta: (token) => {
+            if (speakAbortRef.current) return;
             display += token;
             setLiveText(display.replace(/\[END:[a-z_]+\]/gi, ""));
             feedTts(token);
           },
         });
-        if (!nextCall) {
+        if (!nextCall && !speakAbortRef.current) {
           nextCall = await api.sendMessage(current.id, spoken, "voice");
           const last = [...(nextCall?.messages || [])].reverse().find((m) => m.role === "assistant");
           if (last?.text) feedTts(last.text);
         }
-        const { speakable, rest } = pullSpeakable(ttsBuf, { force: true });
-        if (speakable || rest) queue.push(speakable || rest);
+        if (!speakAbortRef.current) {
+          const { speakable, rest } = pullSpeakable(ttsBuf, { force: true });
+          if (speakable || rest) queue.push(speakable || rest);
+        }
         await queue.drain();
         stopBargeWatch();
         speakingRef.current = false;
@@ -380,33 +466,50 @@ export default function AgentStudio() {
       } else {
         nextCall = await api.sendMessage(current.id, spoken, "chat");
       }
-      if (!nextCall) throw new Error("No reply from agent");
-      callRef.current = nextCall;
-      setCall(nextCall);
+      if (nextCall) {
+        callRef.current = nextCall;
+        setCall(nextCall);
+      } else if (!speakAbortRef.current) {
+        throw new Error("No reply from agent");
+      }
       setLiveText("");
       setHeardText("");
       setPendingUserText("");
       sendingRef.current = false;
+      streamAbortCtrlRef.current = null;
+
+      const barged = speakAbortRef.current;
+      const pending = String(pendingUserRef.current || "").trim();
       if (modeRef.current === "voice") {
-        if (speakAbortRef.current) {
-          // User barged in — listening resumes from barge handler / capture.
-          if (isLive(nextCall) && wantListenRef.current) resumeListening();
-          else if (isLive(nextCall)) resumeListening();
+        if (pending) {
+          pendingUserRef.current = "";
+          await send(pending);
+          return;
+        }
+        if (isLive(nextCall || callRef.current)) {
+          if (!barged) await delay(250);
+          resumeListening();
         } else {
-          await delay(350);
-          if (isLive(nextCall)) resumeListening();
-          else setPhase("idle");
+          setPhase("idle");
         }
       } else {
         setPhase("idle");
       }
     } catch (err) {
-      setError(err.message);
+      if (err?.name !== "AbortError") setError(err.message);
       setPhase("idle");
       speechQueueRef.current?.clear();
       speechQueueRef.current = null;
       speakingRef.current = false;
       stopBargeWatch();
+      sendingRef.current = false;
+      streamAbortCtrlRef.current = null;
+      const pending = String(pendingUserRef.current || "").trim();
+      if (pending && isLive(callRef.current) && modeRef.current === "voice") {
+        pendingUserRef.current = "";
+        await send(pending);
+        return;
+      }
       if (isLive(callRef.current) && modeRef.current === "voice") resumeListening();
     } finally {
       sendingRef.current = false;
@@ -419,9 +522,10 @@ export default function AgentStudio() {
     setPhase("listening");
     scheduleNudge();
     setTimeout(() => {
-      if (!wantListenRef.current || speakingRef.current || sendingRef.current || !isLive()) return;
-      if (!asrLoopRef.current && !recognitionRef.current) startRecognition();
-    }, 120);
+      if (!wantListenRef.current || !isLive()) return;
+      if (speakingRef.current && !callSettings(agentRef.current).allowInterrupt) return;
+      if (!asrLoopRef.current && !recognitionRef.current && !streamSttRef.current) startRecognition();
+    }, 80);
   }
 
   async function mark(status, disposition, reason) {
@@ -467,9 +571,16 @@ export default function AgentStudio() {
   async function stopMic() {
     wantListenRef.current = false;
     clearTimeout(nudgeTimerRef.current);
+    clearTimeout(coalesceTimerRef.current);
+    pendingUserRef.current = "";
     stopListening();
     stopBargeWatch();
     speakAbortRef.current = true;
+    try {
+      streamAbortCtrlRef.current?.abort();
+    } catch {
+      /* ignore */
+    }
     speechQueueRef.current?.clear();
     speakingRef.current = false;
     stopAudio();
@@ -483,27 +594,43 @@ export default function AgentStudio() {
     nudgeTimerRef.current = null;
   }
 
+  function assistantIsWaitingForAnswer() {
+    const messages = callRef.current?.messages || [];
+    const last = [...messages].reverse().find((m) => m.role === "assistant");
+    const text = String(last?.text || "").trim();
+    if (!text) return false;
+    // Only nudge when the agent asked something and is waiting — not after a dead "okay/thanks".
+    if (/[?？]\s*$/.test(text) || /\?\s/u.test(text)) return true;
+    if (/क्या|है\s*\?|ना\s*\?|చెప్పండి|మాట్లాడొచ్చా|please|would you|can we|shall we/i.test(text) && /[?？]/.test(text)) {
+      return true;
+    }
+    return false;
+  }
+
   function scheduleNudge() {
     clearNudgeTimer();
     if (modeRef.current !== "voice" || !isLive() || speakingRef.current || sendingRef.current) return;
     const settings = callSettings(agentRef.current);
     if (!settings.nudgeEnabled) return;
+    if (!assistantIsWaitingForAnswer()) return;
     const nudges = (settings.nudges || []).filter((n) => String(n?.message || "").trim());
     if (!nudges.length) return;
     const index = nudgeIndexRef.current;
     if (index >= nudges.length) {
       if (!settings.hangupAfterNudges) return;
-      const waitMs = Math.max(3, Number(nudges[nudges.length - 1]?.afterSeconds || 5)) * 1000;
+      const waitMs = Math.max(12, Number(nudges[nudges.length - 1]?.afterSeconds || 14)) * 1000;
       nudgeTimerRef.current = setTimeout(() => {
         if (!wantListenRef.current || speakingRef.current || sendingRef.current || !isLive()) return;
+        if (!assistantIsWaitingForAnswer()) return;
         mark("no_answer", "no_answer", "No response after nudges");
       }, waitMs);
       return;
     }
-    const waitMs = Math.max(3, Number(nudges[index].afterSeconds || 5)) * 1000;
+    const waitMs = Math.max(12, Number(nudges[index].afterSeconds || 14)) * 1000;
     quietSinceRef.current = Date.now();
     nudgeTimerRef.current = setTimeout(async () => {
       if (!wantListenRef.current || speakingRef.current || sendingRef.current || !isLive()) return;
+      if (!assistantIsWaitingForAnswer()) return;
       const message = String(nudges[index].message || "").trim();
       nudgeIndexRef.current = index + 1;
       if (!message) {
@@ -597,16 +724,22 @@ export default function AgentStudio() {
   }
 
   async function speak(text) {
-    wantListenRef.current = false;
+    wantListenRef.current = true;
     speakAbortRef.current = false;
     clearNudgeTimer();
-    stopListening();
+    try {
+      recognitionRef.current?.abort();
+    } catch {
+      /* ignore */
+    }
+    recognitionRef.current = null;
     const display = String(text || "").replace(/\[END:[a-z_]+\]/gi, "").trim();
     if (!display) return;
     lastSpokenRef.current = display;
     speakingRef.current = true;
     setPhase("speaking");
     try {
+      ignoreUntilRef.current = Date.now() + 550;
       startBargeWatch();
       const queue = createSpeechQueue({
         play: (chunk) => speakChunk(chunk),
@@ -630,7 +763,7 @@ export default function AgentStudio() {
       stopBargeWatch();
       speakingRef.current = false;
       speechQueueRef.current = null;
-      ignoreUntilRef.current = Date.now() + 700;
+      ignoreUntilRef.current = Date.now() + 400;
     }
   }
 
@@ -653,12 +786,12 @@ export default function AgentStudio() {
     if (!settings.allowInterrupt || modeRef.current !== "voice") return;
     if (!navigator.mediaDevices?.getUserMedia) return;
 
-    // Stricter than listen VAD — avoid cutting the agent on echo / short noise.
-    const threshold = Math.max(rmsFromDb(settings.volumeThresholdDb) * 1.8, 0.045);
+    // Backup RMS interrupt — primary path is live STT while agent speaks.
+    const threshold = Math.max(rmsFromDb(settings.volumeThresholdDb) * 1.35, 0.028);
     let speechFrames = 0;
     const startedAt = Date.now();
     navigator.mediaDevices.getUserMedia({ audio: true }).then((stream) => {
-      if (!speakingRef.current && !sendingRef.current) {
+      if (!speakingRef.current && !speechQueueRef.current?.busy) {
         stream.getTracks().forEach((t) => t.stop());
         return;
       }
@@ -673,26 +806,20 @@ export default function AgentStudio() {
           stopBargeWatch();
           return;
         }
-        // Protect the first 1.2s of each reply from false barge-in.
-        if (Date.now() < ignoreUntilRef.current || Date.now() - startedAt < 1200) {
+        // ~450ms protect against speaker echo at reply start.
+        if (Date.now() < ignoreUntilRef.current || Date.now() - startedAt < 450) {
           speechFrames = 0;
           return;
         }
         const level = analyserRms(analyser, buf);
         if (level >= threshold) {
           speechFrames += 1;
-          // ~500ms of sustained speech before interrupt
-          if (speechFrames >= 10) {
-            speakAbortRef.current = true;
-            speechQueueRef.current?.clear();
-            stopAudio();
-            window.speechSynthesis?.cancel();
-            speakingRef.current = false;
-            stopBargeWatch();
-            ignoreUntilRef.current = Date.now() + 300;
+          // ~150–200ms of sustained speech
+          if (speechFrames >= 3) {
+            interruptSpeaking();
           }
         } else {
-          speechFrames = Math.max(0, speechFrames - 2);
+          speechFrames = Math.max(0, speechFrames - 1);
         }
       }, 50);
       bargeWatchRef.current = { timer, stream, ctx };
@@ -703,6 +830,7 @@ export default function AgentStudio() {
     asrLoopRef.current = false;
     asrGenerationRef.current += 1;
     clearTimeout(silenceRef.current);
+    clearTimeout(coalesceTimerRef.current);
     clearNudgeTimer();
     try {
       streamSttRef.current?.stop();
@@ -740,40 +868,72 @@ export default function AgentStudio() {
     asrLoopRef.current = true;
     const loopId = (asrGenerationRef.current += 1);
     setPhase("listening");
+    const allowUplink = () => {
+      if (!wantListenRef.current || !isLive()) return false;
+      if (Date.now() < ignoreUntilRef.current) return false;
+      const settings = callSettings(agentRef.current);
+      // Keep mic open while agent speaks / thinks so barge-in captures the full phrase.
+      if (speakingRef.current || speechQueueRef.current?.busy || sendingRef.current) {
+        return settings.allowInterrupt !== false;
+      }
+      return true;
+    };
+
     try {
       const session = await startStreamingStt({
         language: sttLanguage(),
         eagerness: callSettings(agentRef.current).eagerness,
-        shouldSend: () =>
-          wantListenRef.current
-          && !speakingRef.current
-          && !sendingRef.current
-          && Date.now() >= ignoreUntilRef.current
-          && isLive(),
+        shouldSend: allowUplink,
         onReady: () => {
-          if (asrGenerationRef.current === loopId) setPhase("listening");
+          if (asrGenerationRef.current === loopId) {
+            if (!speakingRef.current) setPhase("listening");
+          }
+        },
+        onVadStart: () => {
+          if (!wantListenRef.current || asrGenerationRef.current !== loopId) return;
+          if (Date.now() < ignoreUntilRef.current) return;
+          if (speakingRef.current || speechQueueRef.current?.busy) {
+            if (callSettings(agentRef.current).allowInterrupt !== false) interruptSpeaking();
+          }
+          clearNudgeTimer();
         },
         onPartial: (text) => {
-          if (!wantListenRef.current || speakingRef.current || sendingRef.current) return;
+          if (!wantListenRef.current || asrGenerationRef.current !== loopId) return;
           if (Date.now() < ignoreUntilRef.current) return;
           if (!text) return;
+          if (speakingRef.current || speechQueueRef.current?.busy) {
+            if (callSettings(agentRef.current).allowInterrupt === false) return;
+            if (String(text).trim().length < 2) return;
+            if (isNoiseTranscript(text, lastSpokenRef.current)) return;
+            interruptSpeaking();
+          } else if (sendingRef.current) {
+            return;
+          }
           heardRef.current = text;
           setHeardText(text);
           clearNudgeTimer();
         },
-        onFinal: async (text, meta) => {
-          if (!wantListenRef.current || speakingRef.current || sendingRef.current) return;
-          if (asrGenerationRef.current !== loopId) return;
+        onFinal: async (text) => {
+          if (!wantListenRef.current || asrGenerationRef.current !== loopId) return;
           if (Date.now() < ignoreUntilRef.current) return;
           const spoken = String(text || "").trim();
           if (spoken.length < 2) return;
           if (isNoiseTranscript(spoken, lastSpokenRef.current)) return;
-          if (meta?.language && callRef.current) {
-            callRef.current.language = meta.language;
+          // Do not trust STT language_code for Romanized Hindi (often labeled English).
+          if (speakingRef.current || speechQueueRef.current?.busy) {
+            if (callSettings(agentRef.current).allowInterrupt === false) return;
+            interruptSpeaking();
           }
-          heardRef.current = spoken;
-          setHeardText(spoken);
-          await send(spoken);
+          transcriptRef.current = `${transcriptRef.current} ${spoken}`.trim();
+          heardRef.current = transcriptRef.current;
+          setHeardText(transcriptRef.current);
+          clearNudgeTimer();
+          if (sendingRef.current && !speakingRef.current && !speechQueueRef.current?.busy) {
+            pendingUserRef.current = transcriptRef.current;
+            setPendingUserText(transcriptRef.current);
+            return;
+          }
+          scheduleCoalesceFlush();
         },
         onError: (message) => {
           if (asrGenerationRef.current !== loopId) return;
@@ -792,9 +952,9 @@ export default function AgentStudio() {
           if (asrGenerationRef.current !== loopId) return;
           streamSttRef.current = null;
           asrLoopRef.current = false;
-          if (wantListenRef.current && !speakingRef.current && !sendingRef.current && isLive()) {
+          if (wantListenRef.current && !sendingRef.current && isLive()) {
             setTimeout(() => {
-              if (wantListenRef.current && !streamSttRef.current && !speakingRef.current && isLive()) {
+              if (wantListenRef.current && !streamSttRef.current && isLive()) {
                 startRecognition();
               }
             }, 200);
@@ -840,26 +1000,28 @@ export default function AgentStudio() {
     recognitionRef.current = recognition;
 
     recognition.onresult = (event) => {
-      if (speakingRef.current || sendingRef.current) {
-        // Barge-in only on a clear multi-word interrupt after protect window.
+      if (speakingRef.current || speechQueueRef.current?.busy || sendingRef.current) {
         if (
           callSettings(agentRef.current).allowInterrupt
-          && speakingRef.current
+          && (speakingRef.current || speechQueueRef.current?.busy)
           && Date.now() >= ignoreUntilRef.current
         ) {
           let interim = "";
           for (let i = event.resultIndex; i < event.results.length; i += 1) {
             interim += event.results[i][0].transcript;
           }
-          if (String(interim || "").trim().split(/\s+/).filter(Boolean).length >= 3) {
-            speakAbortRef.current = true;
-            speechQueueRef.current?.clear();
-            stopAudio();
-            window.speechSynthesis?.cancel();
-            speakingRef.current = false;
+          const words = String(interim || "").trim().split(/\s+/).filter(Boolean);
+          if (words.length >= 1 && String(interim).trim().length >= 3) {
+            interruptSpeaking();
+            heardRef.current = interim.trim();
+            setHeardText(interim.trim());
           }
         }
-        return;
+        if (sendingRef.current && !(speakingRef.current || speechQueueRef.current?.busy)) {
+          return;
+        }
+        // After interrupt, fall through to accumulate finals below when not speaking.
+        if (speakingRef.current || speechQueueRef.current?.busy) return;
       }
       if (Date.now() < ignoreUntilRef.current) return;
       let finalText = "";
@@ -877,16 +1039,16 @@ export default function AgentStudio() {
       if (combined.length >= 2) {
         silenceRef.current = setTimeout(() => {
           const spoken = (transcriptRef.current || heardRef.current || "").trim();
-          if (spoken.length >= 2 && !speakingRef.current && !sendingRef.current) {
+          if (spoken.length >= 2) {
             if (isNoiseTranscript(spoken, lastSpokenRef.current)) {
               transcriptRef.current = "";
               heardRef.current = "";
               setHeardText("");
               return;
             }
-            send(spoken);
+            void acceptUserSpeech(spoken, { immediate: true });
           }
-        }, Math.max(280, (11 - Number(agentRef.current?.callSettings?.eagerness || 7)) * 110));
+        }, Math.max(420, (11 - Number(agentRef.current?.callSettings?.eagerness || 7)) * 110));
       }
     };
 

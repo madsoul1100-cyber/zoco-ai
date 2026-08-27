@@ -196,9 +196,13 @@ export function detectRequestedLanguage(text) {
 function looksLikeEnglish(text) {
   const raw = String(text || "").trim();
   const letters = raw.replace(/[^A-Za-z]/g, "");
-  if (letters.length < 12) return false;
+  if (letters.length < 10) return false;
+  // Romanized Hindi / Hinglish is not English even with Latin letters.
   if (HINGLISH.test(raw)) return false;
-  return /\b(the|and|you|please|talk|speak|english|what|this|that|have|want|will|just|because|at least|don't|dont|i'm|i am|can you)\b/i.test(raw);
+  if (/\b(mein|me|nahi|nahin|samajh|baat|karo|bolo|kya|hai|aap|mujhe|kyun|kyunki)\b/i.test(raw)) {
+    return false;
+  }
+  return /\b(the|and|you|please|talk|speak|english|what|this|that|have|want|will|just|because|at least|don't|dont|i'm|i am|can you|tell me|why are|why you|calling|date of birth|living in|address|thank you)\b/i.test(raw);
 }
 
 export function detectLanguageFromText(text, fallback = DEFAULT_LANGUAGE) {
@@ -228,9 +232,11 @@ const NOISE_PHRASE =
 const NOISE_LEFTOVER = /^(point|mark|stop|पॉइंट|प्वाइंट|प्वाइन्ट)?$/i;
 
 export function spokenForTts(text) {
+  // Keep .,?!,। and commas — Bulbul uses them for natural pauses and question intonation.
+  // Only strip tags, brackets, and quotes that confuse synthesis.
   return String(text || "")
     .replace(/\[END:[a-z_]+\]/gi, "")
-    .replace(TTS_PUNCT, " ")
+    .replace(/["""''`()[\]{}]/g, " ")
     .replace(/\s+/g, " ")
     .trim();
 }

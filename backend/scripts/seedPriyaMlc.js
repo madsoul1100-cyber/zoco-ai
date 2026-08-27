@@ -123,9 +123,10 @@ const kb = await saveKnowledgeBase({
 });
 
 const callSettings = {
-  speakingSpeed: 1.2,
+  speakingSpeed: 0.95,
   pitch: 0,
-  temperature: 0.7,
+  ttsTemperature: 0.55,
+  temperature: 0.45,
   allowInterrupt: true,
   eagerness: 8,
   volumeThresholdDb: -48,
@@ -139,10 +140,10 @@ const callSettings = {
   sarvamDictId,
   nudgeEnabled: true,
   nudges: [
-    { id: "nudge_1", message: "Hello? Are you on the call?", afterSeconds: 5 },
-    { id: "nudge_2", message: "Hello Sir?", afterSeconds: 10 },
+    { id: "nudge_1", message: "Hello? Are you still there?", afterSeconds: 14 },
+    { id: "nudge_2", message: "Hello?", afterSeconds: 18 },
   ],
-  hangupAfterNudges: true,
+  hangupAfterNudges: false,
   voicemailEnabled: true,
   voicemailMessage: "Hey, seems like I have reached your voicemail. I shall call you back at a later time",
   maxCallMinutes: 15,

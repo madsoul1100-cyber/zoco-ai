@@ -28,12 +28,13 @@ export const api = {
   connect: (id) => request(`/api/calls/${id}/connect`, { method: "POST", body: "{}" }),
   sendMessage: (id, text, source = "chat") =>
     request(`/api/calls/${id}/messages`, { method: "POST", body: JSON.stringify({ text, source }) }),
-  sendMessageStream: async (id, text, { onDelta, onUser, source = "chat" } = {}) => {
+  sendMessageStream: async (id, text, { onDelta, onUser, source = "chat", signal } = {}) => {
     const response = await fetch(`/api/calls/${id}/messages/stream`, {
       method: "POST",
       credentials: "include",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ text, source }),
+      signal,
     });
     if (!response.ok || !response.body) {
       const body = await response.json().catch(() => ({}));
@@ -43,21 +44,34 @@ export const api = {
     const decoder = new TextDecoder();
     let buffer = "";
     let call = null;
-    while (true) {
-      const { done, value } = await reader.read();
-      if (done) break;
-      buffer += decoder.decode(value, { stream: true });
-      const chunks = buffer.split("\n\n");
-      buffer = chunks.pop() || "";
-      for (const chunk of chunks) {
-        const line = chunk.split("\n").find((item) => item.startsWith("data: "));
-        if (!line) continue;
-        const event = JSON.parse(line.slice(6));
-        if (event.type === "user") onUser?.(event.text);
-        if (event.type === "delta") onDelta?.(event.text);
-        if (event.type === "done") call = event.call;
-        if (event.type === "error") throw new Error(event.error);
+    try {
+      while (true) {
+        if (signal?.aborted) {
+          try {
+            await reader.cancel();
+          } catch {
+            /* ignore */
+          }
+          break;
+        }
+        const { done, value } = await reader.read();
+        if (done) break;
+        buffer += decoder.decode(value, { stream: true });
+        const chunks = buffer.split("\n\n");
+        buffer = chunks.pop() || "";
+        for (const chunk of chunks) {
+          const line = chunk.split("\n").find((item) => item.startsWith("data: "));
+          if (!line) continue;
+          const event = JSON.parse(line.slice(6));
+          if (event.type === "user") onUser?.(event.text);
+          if (event.type === "delta") onDelta?.(event.text);
+          if (event.type === "done") call = event.call;
+          if (event.type === "error") throw new Error(event.error);
+        }
       }
+    } catch (err) {
+      if (err?.name === "AbortError" || signal?.aborted) return call;
+      throw err;
     }
     return call;
   },
