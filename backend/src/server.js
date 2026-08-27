@@ -1,5 +1,6 @@
 import cors from "cors";
 import express from "express";
+import http from "node:http";
 import multer from "multer";
 import { v4 as uuid } from "uuid";
 import { generateReply, streamReply } from "./engine/conversation.js";
@@ -7,6 +8,7 @@ import { renderGreeting } from "./engine/template.js";
 import { applyOutcome, dashboardStats, DISPOSITIONS } from "./engine/rules.js";
 import { publicProviderCatalog, resolveLlmConfig } from "./engine/providers.js";
 import { sttReady, transcribeAudio, transcribeFromUrl } from "./engine/stt.js";
+import { mountSttStream } from "./engine/sttStream.js";
 import { QUIET_OFFICE_PATH } from "./engine/ambient.js";
 import { callTimedOut, isMachineAnswer, silenceAction, voicemailMessage } from "./engine/callBehavior.js";
 import { getTtsClip, synthesizeSpeech } from "./engine/tts.js";
@@ -1342,7 +1344,9 @@ const boot = async () => {
   if (agents.length === 0) {
     await import("./seed.js");
   }
-  app.listen(PORT, () => {
+  const server = http.createServer(app);
+  mountSttStream(server);
+  server.listen(PORT, () => {
     console.log(`Zoco AI API on http://localhost:${PORT}`);
   });
   const tel = await resolveTelephony();

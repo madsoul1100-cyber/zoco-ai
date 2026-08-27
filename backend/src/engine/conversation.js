@@ -117,9 +117,10 @@ Hard speech rules from the Instructions (never break these):
 - Never say ధన్యవాదాలు. Use English "Thank you" only for genuine thanks, never for giving a name/district/year.
 - Always speak the English words "Form 18". Never say ఫారం, ఫార్మ్ or ఫార్మే.
 - Default to one short spoken sentence; two only when needed before one question.
-- On refusal / not interested / wrong person / opt-out: speak exactly సరే అండి (Telugu), then end. Never mix Devanagari into that line.
+- On refusal / not interested / wrong person / opt-out: speak a short closing in the ACTIVE language (English goodbye / Hindi ठीक है, धन्यवाद / Telugu సరే అండి), then end.
 - After a language switch, continue the Graduate MLC outbound pitch. Never ask generic how-can-I-help.
-- When the active language is Hindi, speak only Devanagari Hindi until another language is requested (except Ending Telugu lines).`
+- When the active language is Hindi, speak only Devanagari Hindi until another language is requested.
+- When the active language is English, speak natural Indian English only until another language is requested.`
       : `You work for the business in the use case. Sound like a real agency person, not a generic assistant. One or two short sentences. Never more than 25 words.`,
     languageInstruction(agent),
     `Use case: ${agent.useCase}. Goal: ${agent.successCriteria}.`,
@@ -167,34 +168,38 @@ Hard speech rules from the Instructions (never break these):
       messages.push({
         role: "system",
         content:
-          "LANGUAGE LOCK for this turn: speak natural Hindi only in Devanagari. Do not mix Telugu script into conversational lines. Continue the Graduate MLC outbound pitch (recording / separate list / graduation / Form 18 as needed). Never ask generic how can I help. Exception: if Ending applies, speak the exact Telugu line సరే అండి (or the other Ending Telugu lines) then [END:...]. Prefer the Instructions over any generic brevity rule.",
+          "LANGUAGE LOCK for this turn: speak natural Hindi only in Devanagari. Do not mix Telugu script into conversational lines. Continue the Graduate MLC outbound pitch (recording / separate list / graduation / Form 18 as needed). Never ask generic how can I help. If Ending applies, close in Hindi (ठीक है, धन्यवाद) then [END:...]. Prefer the Instructions over any generic brevity rule.",
       });
     } else if (code === "en-IN") {
       messages.push({ role: "system", content: languageLock(agent) });
     } else {
       messages.push({
         role: "system",
-        content: `LANGUAGE LOCK for this turn: speak ${lang.label} primarily in the ${lang.native} script unless the caller clearly switched. Keep [END:...] tags in ASCII. Prefer the Instructions over any generic brevity rule. Ending lines must stay exact Telugu as written (సరే అండి).`,
+        content: `LANGUAGE LOCK for this turn: speak ${lang.label} primarily in the ${lang.native} script unless the caller clearly switched. Keep [END:...] tags in ASCII. Prefer the Instructions over any generic brevity rule. Closing lines must match this active language.`,
       });
     }
   }
   return messages;
 }
 
-function sanitizeSpoken(text) {
-  return String(text || "")
+function sanitizeSpoken(text, language = "te-IN") {
+  let next = String(text || "")
     .replace(/ధన్యవాదాలు\.?/g, "")
     .replace(/అప్లికేషన్\s*ఫారం|అప్లికేషన్\s*ఫార్మ్|ఫార్మే|ఫార్మ్|ఫారం/g, "Form 18")
     .replace(/\bForm\s*18\s*Form\s*18\b/gi, "Form 18")
-    // Fix common Devanagari/Telugu corruption on required endings.
-    .replace(/सరే\s*అండి\.?/g, "సరే అండి.")
-    .replace(/सारे\s*अंडी\.?|सरे\s*अंडी\.?|सरे\s*अन्डि\.?/gi, "సరే అండి.")
     .replace(/[ \t]{2,}/g, " ")
     .replace(/\s+([,.;])/g, "$1")
     .trim();
+  // Only repair corrupted Telugu endings when Telugu is active.
+  if (getLanguage(language).code === "te-IN") {
+    next = next
+      .replace(/सరే\s*అండి\.?/g, "సరే అండి.")
+      .replace(/सारे\s*अंडी\.?|सरे\s*अंडी\.?|सरे\s*अन्डि\.?/gi, "సరే అండి.");
+  }
+  return next;
 }
 
-export function parseSpoken(content) {
+export function parseSpoken(content, language = "te-IN") {
   if (!content) return { text: "", endCall: false, disposition: null };
   let raw = String(content).replace(/```json|```/g, "").trim();
   const end = raw.match(/\[END:([a-z_]+)\]/i);
@@ -204,7 +209,7 @@ export function parseSpoken(content) {
     try {
       const json = JSON.parse(raw);
       parsed = {
-        text: sanitizeSpoken(String(json.text || "").trim()),
+        text: sanitizeSpoken(String(json.text || "").trim(), language),
         endCall: Boolean(json.endCall || end),
         disposition: json.disposition || end?.[1]?.toLowerCase() || null,
       };
@@ -214,27 +219,46 @@ export function parseSpoken(content) {
   }
   if (!parsed) {
     parsed = {
-      text: sanitizeSpoken(raw),
+      text: sanitizeSpoken(raw, language),
       endCall: Boolean(end),
       disposition: end?.[1]?.toLowerCase() || null,
     };
   }
-  return enforceClosingLine(parsed);
+  return enforceClosingLine(parsed, language);
 }
 
-function enforceClosingLine(parsed) {
-  const disposition = parsed?.disposition;
-  if (!parsed?.endCall || !disposition) return parsed;
+function closingLineFor(disposition, language = "te-IN") {
+  const code = getLanguage(language).code;
   if (disposition === "not_interested" || disposition === "wrong_person") {
-    return { ...parsed, text: "సరే అండి." };
+    if (code === "hi-IN") return "ठीक है, धन्यवाद।";
+    if (code === "en-IN") return "Okay, thank you. Goodbye.";
+    return "సరే అండి.";
   }
   if (disposition === "do_not_call") {
-    return { ...parsed, text: "సరే, మళ్లీ call చేయవద్దన్న మీ request నమోదు చేస్తున్నాను." };
+    if (code === "hi-IN") return "ठीक है, दोबारा कॉल नहीं करेंगे।";
+    if (code === "en-IN") return "Okay, I will note not to call again. Goodbye.";
+    return "సరే, మళ్లీ call చేయవద్దన్న మీ request నమోదు చేస్తున్నాను.";
+  }
+  if (disposition === "callback_requested") {
+    if (code === "hi-IN") return "ठीक है, आपके बताए समय पर कॉल करूँगी।";
+    if (code === "en-IN") return "Okay, I will call you back at the time you said.";
+    return "సరే, మీరు చెప్పిన time note చేశాను.";
+  }
+  if (code === "hi-IN") return "ठीक है, धन्यवाद।";
+  if (code === "en-IN") return "Okay, thank you. Goodbye.";
+  return "సరే అండి.";
+}
+
+function enforceClosingLine(parsed, language = "te-IN") {
+  const disposition = parsed?.disposition;
+  if (!parsed?.endCall || !disposition) return parsed;
+  if (["not_interested", "wrong_person", "do_not_call"].includes(disposition)) {
+    return { ...parsed, text: closingLineFor(disposition, language) };
   }
   if (disposition === "callback_requested") {
     const text = String(parsed.text || "").trim();
-    if (!text || /सరే|सारे|सरे|ठीक है/.test(text)) {
-      return { ...parsed, text: "సరే, మీరు చెప్పిన time note చేశాను." };
+    if (!text || /సరే|सारे|सरे|ठीक है|okay|thank you/i.test(text)) {
+      return { ...parsed, text: closingLineFor(disposition, language) };
     }
   }
   return parsed;
@@ -376,14 +400,15 @@ async function completeWithTools({ agent, call, history, userText, slots, llm, k
     data = await chatCompletion(llm, { agent, messages, tools, stream: false });
   }
   const content = data.choices?.[0]?.message?.content || extra;
-  let parsed = parseSpoken(content);
+  const lang = agent?.language || "te-IN";
+  let parsed = parseSpoken(content, lang);
   if (forcedEnd) {
     parsed.endCall = true;
     parsed.disposition = forcedEnd;
     if (!parsed.text) {
       parsed.text = extra || defaultEndLine(forcedEnd, agent);
     }
-    parsed = enforceClosingLine(parsed);
+    parsed = enforceClosingLine(parsed, lang);
   }
   if (transfer) parsed.transfer = transfer;
   return parsed;
@@ -397,15 +422,31 @@ function cannedVoiceTurn({ agent, history, userText, slots }) {
   const lower = text.toLowerCase();
   const name = String(slots?.customer_name || slots?.name || "").trim();
   const honorific = name ? `${name} గారు` : "గారు";
-  // Allow canned for first user reply after greeting (turn === 1 once attached).
-  if (turn > 2) return null;
+  // Only first user reply after greeting.
+  if (turn > 1) return null;
 
-  if (/(not interested|no thanks|don't call|do not call|వద్దు|అక్కర్లేదు|interested కాదు)/i.test(lower)
-    || /नहीं|रुचि नहीं|मत करो/.test(text)) {
-    return { text: "సరే అండి.", endCall: true, disposition: "not_interested" };
+  // Never treat language-switch / clarification as refusal.
+  if (/hindi|english|telugu|हिंदी|हिन्दी|తెలుగు|में बात|लो बात|switch|language|समझ नहीं|samajh/i.test(text)) {
+    return null;
   }
-  if (/^(yes|yeah|yep|ok|okay|sure|haan|हां|जी|అవును|చెప్పండి|మాట్లాడొచ్చు|మాట్లాడవచ్చు)\b/i.test(text)
-    || /^(yes|ok|okay|sure|అవును)([,.!\s]|$)/i.test(text)) {
+
+  if (
+    /(not interested|no thanks|don't call|do not call|not now|వద్దు|అక్కర్లేదు|interested\s*కాదు)/i.test(lower)
+    || /(रुचि नहीं|दिलचस्पी नहीं|कॉल मत|फोन मत करो|बात नहीं करनी)/.test(text)
+  ) {
+    const lang = getLanguage(agent?.language).code;
+    return {
+      text: closingLineFor("not_interested", lang),
+      endCall: true,
+      disposition: "not_interested",
+    };
+  }
+
+  // Strict short affirmations only (avoid matching longer questions).
+  if (text.length <= 28 && (
+    /^(yes|yeah|yep|ok|okay|sure|haan|हां|जी हाँ|जी|అవును|చెప్పండి|మాట్లాడొచ్చు|మాట్లాడవచ్చు)([,.!\s]*)$/i.test(text)
+    || /^(అవును[\s,]*చెప్పండి)([,.!\s]*)$/i.test(text)
+  )) {
     const lang = getLanguage(agent?.language).code;
     if (lang === "hi-IN") {
       return {
@@ -435,26 +476,13 @@ function cannedVoiceTurn({ agent, history, userText, slots }) {
 }
 
 function defaultEndLine(disposition, agent) {
-  // Priya/MLC endings stay Telugu exactly as written in Instructions, even mid-Hindi call.
-  const rich = Array.isArray(agent?.instructionSections) && agent.instructionSections.length > 0;
-  if (rich || getLanguage(agent?.language).code === "te-IN") {
-    if (disposition === "do_not_call") return "సరే, మళ్లీ call చేయవద్దన్న మీ request నమోదు చేస్తున్నాను.";
-    if (disposition === "callback_requested") return "సరే, మీరు చెప్పిన time note చేశాను.";
-    return "సరే అండి.";
-  }
-  const lang = getLanguage(agent?.language).code;
-  if (lang === "hi-IN") {
-    if (disposition === "do_not_call") return "ठीक है, दोबारा कॉल नहीं करेंगे।";
-    return "ठीक है।";
-  }
-  if (disposition === "do_not_call") return "Okay, I will note not to call again.";
-  return "Okay.";
+  return closingLineFor(disposition, agent?.language || "te-IN");
 }
 
 async function chatCompletion(llm, { agent, messages, tools, stream, maxTokens }) {
   const rich = Array.isArray(agent?.instructionSections) && agent.instructionSections.length;
   const defaultMax = stream
-    ? rich ? 70 : 55
+    ? rich ? 140 : 90
     : rich ? 220 : getLanguage(agent?.language).code === "en-IN" ? 90 : 140;
   const payload = {
     model: llm.model,
@@ -566,7 +594,7 @@ export async function streamReply({ agent, call, userText, knowledge = "", onTok
       return { ...local, slots, provider: "local", model: null };
     }
     return {
-      ...guardEarlyHangup(parseSpoken(full), call),
+      ...guardEarlyHangup(parseSpoken(full, speaking.language || call?.language), call),
       slots,
       provider: llm.provider,
       model: llm.model,

@@ -10,6 +10,7 @@ import { compileInstructions, resolveInstructionSections, splitInstructionText }
 import { callSettings } from "../lib/builder.js";
 import { languageLabel } from "../lib/languages.js";
 import { loadVoices, pickVoice, speakText, playAudio, stopAudio, stopAmbient, voicesForLang, spokenForTts, isNoiseTranscript, pullSpeakable, createSpeechQueue, analyserRms, rmsFromDb } from "../lib/voice.js";
+import { startStreamingStt } from "../lib/sttStream.js";
 
 function delay(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
@@ -95,6 +96,7 @@ export default function AgentStudio() {
   const [voiceName, setVoiceName] = useState("");
   const [liveText, setLiveText] = useState("");
   const [heardText, setHeardText] = useState("");
+  const [pendingUserText, setPendingUserText] = useState("");
   const recorder = useRef(null);
   const chunks = useRef([]);
   const callRef = useRef(null);
@@ -120,6 +122,7 @@ export default function AgentStudio() {
   const speakAbortRef = useRef(false);
   const bargeWatchRef = useRef(null);
   const ttsPrepRef = useRef(new Map());
+  const streamSttRef = useRef(null);
   const [tab, setTab] = useState(() => {
     const requested = searchParams.get("tab");
     if (requested && RAIL.some((item) => item.id === requested)) return requested;
@@ -265,6 +268,7 @@ export default function AgentStudio() {
     setError("");
     setLiveText("");
     setHeardText("");
+    setPendingUserText("");
     setMode(channel);
     modeRef.current = channel;
     wantListenRef.current = false;
@@ -318,8 +322,9 @@ export default function AgentStudio() {
     stopBargeWatch();
     setDraft("");
     transcriptRef.current = "";
-    heardRef.current = "";
-    setHeardText("");
+    heardRef.current = spoken;
+    setPendingUserText(spoken);
+    setHeardText(spoken);
     setLiveText("");
     setPhase("thinking");
     let nextCall = null;
@@ -330,6 +335,7 @@ export default function AgentStudio() {
           onStart: () => {
             speakingRef.current = true;
             setPhase("speaking");
+            ignoreUntilRef.current = Date.now() + 1200;
             startBargeWatch();
           },
           onIdle: () => {},
@@ -378,6 +384,8 @@ export default function AgentStudio() {
       callRef.current = nextCall;
       setCall(nextCall);
       setLiveText("");
+      setHeardText("");
+      setPendingUserText("");
       sendingRef.current = false;
       if (modeRef.current === "voice") {
         if (speakAbortRef.current) {
@@ -622,7 +630,7 @@ export default function AgentStudio() {
       stopBargeWatch();
       speakingRef.current = false;
       speechQueueRef.current = null;
-      ignoreUntilRef.current = Date.now() + 400;
+      ignoreUntilRef.current = Date.now() + 700;
     }
   }
 
@@ -645,8 +653,10 @@ export default function AgentStudio() {
     if (!settings.allowInterrupt || modeRef.current !== "voice") return;
     if (!navigator.mediaDevices?.getUserMedia) return;
 
-    const threshold = rmsFromDb(settings.volumeThresholdDb);
+    // Stricter than listen VAD — avoid cutting the agent on echo / short noise.
+    const threshold = Math.max(rmsFromDb(settings.volumeThresholdDb) * 1.8, 0.045);
     let speechFrames = 0;
+    const startedAt = Date.now();
     navigator.mediaDevices.getUserMedia({ audio: true }).then((stream) => {
       if (!speakingRef.current && !sendingRef.current) {
         stream.getTracks().forEach((t) => t.stop());
@@ -663,24 +673,26 @@ export default function AgentStudio() {
           stopBargeWatch();
           return;
         }
-        if (Date.now() < ignoreUntilRef.current) {
+        // Protect the first 1.2s of each reply from false barge-in.
+        if (Date.now() < ignoreUntilRef.current || Date.now() - startedAt < 1200) {
           speechFrames = 0;
           return;
         }
         const level = analyserRms(analyser, buf);
         if (level >= threshold) {
           speechFrames += 1;
-          if (speechFrames >= 4) {
+          // ~500ms of sustained speech before interrupt
+          if (speechFrames >= 10) {
             speakAbortRef.current = true;
             speechQueueRef.current?.clear();
             stopAudio();
             window.speechSynthesis?.cancel();
             speakingRef.current = false;
             stopBargeWatch();
-            ignoreUntilRef.current = Date.now() + 200;
+            ignoreUntilRef.current = Date.now() + 300;
           }
         } else {
-          speechFrames = 0;
+          speechFrames = Math.max(0, speechFrames - 2);
         }
       }, 50);
       bargeWatchRef.current = { timer, stream, ctx };
@@ -692,6 +704,12 @@ export default function AgentStudio() {
     asrGenerationRef.current += 1;
     clearTimeout(silenceRef.current);
     clearNudgeTimer();
+    try {
+      streamSttRef.current?.stop();
+    } catch {
+      /* ignore */
+    }
+    streamSttRef.current = null;
     try {
       recognitionRef.current?.abort();
     } catch {
@@ -711,114 +729,90 @@ export default function AgentStudio() {
     startRecognition();
   }
 
+  function sttLanguage() {
+    const settings = callSettings(agentRef.current);
+    if (settings.autoDetectLanguage !== false || settings.switchLanguage !== false) return "auto";
+    return callRef.current?.language || agentRef.current?.language || "auto";
+  }
+
   async function startSarvamLoop() {
-    if (asrLoopRef.current) return;
+    if (asrLoopRef.current || streamSttRef.current) return;
     asrLoopRef.current = true;
     const loopId = (asrGenerationRef.current += 1);
     setPhase("listening");
-    let stream;
-    let audioCtx;
     try {
-      stream = await navigator.mediaDevices.getUserMedia({ audio: true });
-      audioCtx = new (window.AudioContext || window.webkitAudioContext)();
-      const source = audioCtx.createMediaStreamSource(stream);
-      const analyser = audioCtx.createAnalyser();
-      analyser.fftSize = 512;
-      source.connect(analyser);
-      const samples = new Uint8Array(analyser.fftSize);
-      const settings = () => callSettings(agentRef.current);
-      const threshold = () => rmsFromDb(settings().volumeThresholdDb);
-      const silenceMs = () => Math.max(280, (11 - Number(settings().eagerness || 7)) * 70);
-
-      while (
-        asrLoopRef.current &&
-        asrGenerationRef.current === loopId &&
-        wantListenRef.current &&
-        !speakingRef.current &&
-        !sendingRef.current &&
-        isLive()
-      ) {
-        // Wait for speech to start
-        let heardSpeech = false;
-        const waitStart = Date.now();
-        while (
-          asrLoopRef.current &&
-          asrGenerationRef.current === loopId &&
-          wantListenRef.current &&
-          !speakingRef.current &&
-          !sendingRef.current &&
-          Date.now() - waitStart < 60000
-        ) {
-          if (Date.now() < ignoreUntilRef.current) {
-            await delay(40);
-            continue;
+      const session = await startStreamingStt({
+        language: sttLanguage(),
+        eagerness: callSettings(agentRef.current).eagerness,
+        shouldSend: () =>
+          wantListenRef.current
+          && !speakingRef.current
+          && !sendingRef.current
+          && Date.now() >= ignoreUntilRef.current
+          && isLive(),
+        onReady: () => {
+          if (asrGenerationRef.current === loopId) setPhase("listening");
+        },
+        onPartial: (text) => {
+          if (!wantListenRef.current || speakingRef.current || sendingRef.current) return;
+          if (Date.now() < ignoreUntilRef.current) return;
+          if (!text) return;
+          heardRef.current = text;
+          setHeardText(text);
+          clearNudgeTimer();
+        },
+        onFinal: async (text, meta) => {
+          if (!wantListenRef.current || speakingRef.current || sendingRef.current) return;
+          if (asrGenerationRef.current !== loopId) return;
+          if (Date.now() < ignoreUntilRef.current) return;
+          const spoken = String(text || "").trim();
+          if (spoken.length < 2) return;
+          if (isNoiseTranscript(spoken, lastSpokenRef.current)) return;
+          if (meta?.language && callRef.current) {
+            callRef.current.language = meta.language;
           }
-          if (analyserRms(analyser, samples) >= threshold()) {
-            heardSpeech = true;
-            break;
-          }
-          await delay(40);
-        }
-        if (!heardSpeech || !asrLoopRef.current || speakingRef.current || sendingRef.current) continue;
-
-        const chunks = [];
-        const media = new MediaRecorder(stream);
-        media.ondataavailable = (event) => {
-          if (event.data.size) chunks.push(event.data);
-        };
-        media.start(250);
-        const utterStart = Date.now();
-        let lastLoud = Date.now();
-        while (asrLoopRef.current && asrGenerationRef.current === loopId && Date.now() - utterStart < 10000) {
-          const level = analyserRms(analyser, samples);
-          if (level >= threshold() * 0.85) lastLoud = Date.now();
-          if (Date.now() - lastLoud >= silenceMs() && Date.now() - utterStart > 400) break;
-          await delay(40);
-        }
-        if (media.state === "recording") media.stop();
-        await new Promise((resolve) => {
-          media.onstop = resolve;
-        });
-        if (!asrLoopRef.current || asrGenerationRef.current !== loopId || speakingRef.current || sendingRef.current) break;
-
-        const blob = new Blob(chunks, { type: "audio/webm" });
-        if (blob.size < 1200) continue;
-        const { transcript } = await api.transcribe(
-          blob,
-          callRef.current?.language || agentRef.current?.language || "en-IN"
-        );
-        const spoken = String(transcript || "").trim();
-        if (spoken.length >= 2 && !isNoiseTranscript(spoken, lastSpokenRef.current)) {
           heardRef.current = spoken;
           setHeardText(spoken);
           await send(spoken);
-          break;
-        }
-      }
-    } catch (err) {
-      if (wantListenRef.current && asrGenerationRef.current === loopId) startBrowserRecognition();
-      else if (wantListenRef.current) setError(err.message);
-    } finally {
-      if (asrGenerationRef.current === loopId) asrLoopRef.current = false;
-      try {
-        await audioCtx?.close();
-      } catch {
-        /* ignore */
-      }
-      stream?.getTracks().forEach((track) => track.stop());
-      if (
-        wantListenRef.current &&
-        asrGenerationRef.current === loopId &&
-        !speakingRef.current &&
-        !sendingRef.current &&
-        isLive() &&
-        !asrLoopRef.current
-      ) {
-        setTimeout(() => {
-          if (wantListenRef.current && !asrLoopRef.current && !speakingRef.current && !sendingRef.current && isLive()) {
-            startRecognition();
+        },
+        onError: (message) => {
+          if (asrGenerationRef.current !== loopId) return;
+          console.warn("Streaming STT:", message);
+          try {
+            streamSttRef.current?.stop();
+          } catch {
+            /* ignore */
           }
-        }, 150);
+          streamSttRef.current = null;
+          asrLoopRef.current = false;
+          if (wantListenRef.current && isLive()) startBrowserRecognition();
+          else setError(message || "Live transcription failed");
+        },
+        onClose: () => {
+          if (asrGenerationRef.current !== loopId) return;
+          streamSttRef.current = null;
+          asrLoopRef.current = false;
+          if (wantListenRef.current && !speakingRef.current && !sendingRef.current && isLive()) {
+            setTimeout(() => {
+              if (wantListenRef.current && !streamSttRef.current && !speakingRef.current && isLive()) {
+                startRecognition();
+              }
+            }, 200);
+          }
+        },
+      });
+      if (asrGenerationRef.current !== loopId) {
+        session.stop();
+        return;
+      }
+      streamSttRef.current = session;
+    } catch (err) {
+      asrLoopRef.current = false;
+      streamSttRef.current = null;
+      if (wantListenRef.current && asrGenerationRef.current === loopId) {
+        startBrowserRecognition();
+      } else if (wantListenRef.current) {
+        setError(err.message || "Could not start live transcription");
       }
     }
   }
@@ -847,13 +841,17 @@ export default function AgentStudio() {
 
     recognition.onresult = (event) => {
       if (speakingRef.current || sendingRef.current) {
-        // Barge-in via browser ASR when agent is speaking
-        if (callSettings(agentRef.current).allowInterrupt && speakingRef.current && Date.now() >= ignoreUntilRef.current) {
+        // Barge-in only on a clear multi-word interrupt after protect window.
+        if (
+          callSettings(agentRef.current).allowInterrupt
+          && speakingRef.current
+          && Date.now() >= ignoreUntilRef.current
+        ) {
           let interim = "";
           for (let i = event.resultIndex; i < event.results.length; i += 1) {
             interim += event.results[i][0].transcript;
           }
-          if (String(interim || "").trim().length >= 2) {
+          if (String(interim || "").trim().split(/\s+/).filter(Boolean).length >= 3) {
             speakAbortRef.current = true;
             speechQueueRef.current?.clear();
             stopAudio();
@@ -1034,7 +1032,12 @@ export default function AgentStudio() {
             <StatusBadge status={call.status} disposition={call.disposition} />
             <span className="muted">{languageLabel(call.language || agent.language)}</span>
           </div>
-          <MessageTimeline messages={call.messages} liveText={liveText} heardText={heardText} />
+          <MessageTimeline
+            messages={call.messages}
+            liveText={liveText}
+            heardText={heardText}
+            pendingUserText={pendingUserText}
+          />
           {live ? (
             <div className="composer">
               <input

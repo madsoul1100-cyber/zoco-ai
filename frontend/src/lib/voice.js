@@ -175,9 +175,9 @@ export function splitSentences(buffer) {
 
 /**
  * Pull the next speakable clause from a streaming LLM buffer.
- * Speaks ASAP: sentence end, Indic danda, or early word flush for low TTFA.
+ * Only split on real sentence ends — word-chunk splitting made voice sound broken.
  */
-export function pullSpeakable(buffer, { force = false, minChars = 8 } = {}) {
+export function pullSpeakable(buffer, { force = false, minChars = 18 } = {}) {
   const text = String(buffer || "");
   if (!text.trim()) return { speakable: null, rest: "" };
   if (force) return { speakable: text.trim(), rest: "" };
@@ -192,20 +192,11 @@ export function pullSpeakable(buffer, { force = false, minChars = 8 } = {}) {
     return { speakable: danda[1].trim(), rest: danda[2] || "" };
   }
 
-  // Early flush: enough words/chars even without punctuation (voice TTFA).
-  const trimmed = text.trim();
-  const words = trimmed.split(/\s+/).filter(Boolean);
-  if (words.length >= 3 || trimmed.length >= Math.max(minChars, 14)) {
-    const soft = text.match(/^([\s\S]{4,}?[,;，、])\s+([\s\S]+)$/u);
+  // Soft split only on a long clause with a comma (keeps TTS from waiting forever).
+  if (text.trim().length >= Math.max(minChars, 42)) {
+    const soft = text.match(/^([\s\S]{18,}?[,;，、])\s+([\s\S]+)$/u);
     if (soft?.[1]?.trim()) {
       return { speakable: soft[1].trim(), rest: soft[2] || "" };
-    }
-    // Split after 3–5 words so TTS can start while LLM continues.
-    if (words.length >= 3) {
-      const cut = Math.min(5, Math.max(3, words.length - 1));
-      const head = words.slice(0, cut).join(" ");
-      const tail = words.slice(cut).join(" ");
-      if (head.length >= 4) return { speakable: head, rest: tail ? `${tail}${/\s$/.test(text) ? " " : ""}` : "" };
     }
   }
 

@@ -517,6 +517,17 @@ label {
 
 .bubble.user b { color: rgba(255, 255, 255, 0.6); }
 
+.bubble.user.live-hear,
+.bubble.user.pending {
+  opacity: 0.92;
+  box-shadow: inset 0 0 0 1px rgba(255, 255, 255, 0.18);
+}
+
+.bubble.assistant.live-speak {
+  border-style: dashed;
+  opacity: 0.95;
+}
+
 .bubble.assistant { border: 1px solid var(--line); background: #fff; }
 .bubble.system { margin: 0 auto; background: transparent; color: var(--muted); font-size: 12px; }
 .bubble em {

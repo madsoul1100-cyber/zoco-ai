@@ -112,14 +112,21 @@ export function Modal({ open, title, onClose, children, footer }) {
   );
 }
 
-export function MessageTimeline({ messages = [], liveText, heardText }) {
+export function MessageTimeline({ messages = [], liveText, heardText, pendingUserText }) {
   const boxRef = useRef(null);
 
   useEffect(() => {
     const el = boxRef.current;
     if (!el) return;
     el.scrollTop = el.scrollHeight;
-  }, [messages, liveText, heardText]);
+  }, [messages, liveText, heardText, pendingUserText]);
+
+  const lastUser = [...messages].reverse().find((m) => m.role === "user");
+  const pending = String(pendingUserText || "").trim();
+  const showPending = pending && pending !== String(lastUser?.text || "").trim();
+  const hearing = String(heardText || "").trim();
+  // Keep the live caption even while a pending line exists if hearing is newer/different.
+  const showHearing = hearing && hearing !== pending;
 
   return (
     <div className="timeline" ref={boxRef}>
@@ -130,15 +137,21 @@ export function MessageTimeline({ messages = [], liveText, heardText }) {
           {message.source ? <em>{message.source}</em> : null}
         </div>
       ))}
-      {heardText ? (
-        <div className="bubble user">
-          <b>you · hearing</b>
-          {heardText}
+      {showPending ? (
+        <div className="bubble user pending">
+          <b>you</b>
+          {pending}
+        </div>
+      ) : null}
+      {showHearing ? (
+        <div className="bubble user live-hear">
+          <b>you · speaking</b>
+          {hearing}
         </div>
       ) : null}
       {liveText ? (
-        <div className="bubble assistant">
-          <b>assistant · live</b>
+        <div className="bubble assistant live-speak">
+          <b>assistant · speaking</b>
           {liveText}
         </div>
       ) : null}
