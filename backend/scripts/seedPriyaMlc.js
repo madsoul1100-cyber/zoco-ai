@@ -125,7 +125,7 @@ const kb = await saveKnowledgeBase({
 const callSettings = {
   speakingSpeed: 0.95,
   pitch: 0,
-  ttsTemperature: 0.55,
+  ttsTemperature: 0.42,
   temperature: 0.45,
   allowInterrupt: true,
   eagerness: 8,
@@ -179,7 +179,7 @@ const agent = await saveAgent({
   llmModel: process.env.OPENROUTER_MODEL || "google/gemini-2.5-flash",
   ttsProvider: "sarvam",
   ttsModel: "bulbul:v3",
-  ttsVoice: "priya",
+  ttsVoice: "kavya",
   knowledgeBaseIds: [kb.id],
   inputVariables: [
     { key: "customer_name", defaultValue: "" },

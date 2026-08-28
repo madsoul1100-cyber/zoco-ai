@@ -102,12 +102,13 @@ export function startAmbient(url, volume = 0.12) {
   return audio;
 }
 
-export function playAudio(url, { timeoutMs = 25000 } = {}) {
+export function playAudio(url, { timeoutMs = 120000 } = {}) {
   return new Promise((resolve, reject) => {
     if (!url) return reject(new Error("No audio to play"));
     window.speechSynthesis?.cancel();
     stopAudio();
     const audio = new Audio(url);
+    audio.preload = "auto";
     currentPlayer = audio;
     let settled = false;
     const finish = (fn, value) => {
@@ -134,7 +135,7 @@ export function playAudio(url, { timeoutMs = 25000 } = {}) {
       const ms = Number(audio.duration) * 1000;
       if (Number.isFinite(ms) && ms > 0) {
         clearTimeout(timer);
-        timer = setTimeout(() => finish(resolve), Math.min(timeoutMs, ms + 1200));
+        timer = setTimeout(() => finish(resolve), Math.min(timeoutMs, ms + 400));
       }
     };
     audio.onended = () => finish(resolve);

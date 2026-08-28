@@ -1,7 +1,7 @@
 export const DEFAULT_CALL_SETTINGS = {
   speakingSpeed: 0.95,
   pitch: 0,
-  ttsTemperature: 0.55,
+  ttsTemperature: 0.42,
   temperature: 0.4,
   allowInterrupt: true,
   eagerness: 7,

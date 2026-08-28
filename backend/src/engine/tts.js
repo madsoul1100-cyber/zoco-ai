@@ -47,8 +47,8 @@ export function voiceDynamics(agent) {
   let pace = Math.min(2, Math.max(0.5, Number(settings.speakingSpeed ?? 0.95) || 0.95));
   if (pace > 1.02) pace = 1.02;
   const pitch = Math.min(0.75, Math.max(-0.75, Number(settings.pitch ?? 0) || 0));
-  // Lower temperature = same voice character across sentence clips (high temp = “different person”).
-  const temperature = Math.min(0.85, Math.max(0.2, Number(settings.ttsTemperature ?? 0.55) || 0.55));
+  // Lower temperature = one consistent speaker across the whole turn.
+  const temperature = Math.min(0.75, Math.max(0.2, Number(settings.ttsTemperature ?? 0.42) || 0.42));
   return { pace, pitch, temperature };
 }
 
@@ -64,7 +64,7 @@ async function synthesizeSarvam({
   apiKey,
   pace = 1,
   pitch = 0,
-  temperature = 0.55,
+  temperature = 0.42,
   dictId = "",
   sampleRate = 24000,
 }) {
@@ -75,12 +75,13 @@ async function synthesizeSarvam({
     model: model || "bulbul:v3",
     pace: Math.min(2, Math.max(0.5, Number(pace) || 0.95)),
     speech_sample_rate: Number(sampleRate) || 24000,
+    output_audio_codec: "mp3",
   };
   if (isSarvamV2(payload.model)) {
     payload.pitch = pitch;
   } else {
     // Cap expressiveness so consecutive clips stay the same speaker.
-    payload.temperature = Math.min(0.85, Math.max(0.01, Number(temperature) || 0.55));
+    payload.temperature = Math.min(0.75, Math.max(0.01, Number(temperature) || 0.42));
   }
   if (dictId && !isSarvamV2(payload.model)) payload.dict_id = dictId;
   const response = await fetch("https://api.sarvam.ai/text-to-speech", {
@@ -145,8 +146,8 @@ export async function synthesizeSpeech({
   const { pace, pitch, temperature } = voiceDynamics(agent);
   const withAmbient = !skipAmbient && ambientEnabled(callSettings);
   const ambVol = ambientVolume(callSettings);
-  // Studio gets fuller audio; phone can stay 24 kHz.
-  const sampleRate = source === "studio" || skipAmbient ? 48000 : 24000;
+  // 24 kHz mp3 — fast to synthesize and play; one clip per turn keeps voice consistent.
+  const sampleRate = 24000;
   let dictId = String(callSettings.sarvamDictId || "").trim();
   if (!dictId && tts.provider === "sarvam" && pronunciationCount(pronunciations) > 0) {
     try {

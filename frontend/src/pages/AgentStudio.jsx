@@ -9,7 +9,7 @@ import { GeniePanel } from "../components/GeniePanel.jsx";
 import { compileInstructions, resolveInstructionSections, splitInstructionText } from "../lib/instructionPacks.js";
 import { callSettings } from "../lib/builder.js";
 import { languageLabel } from "../lib/languages.js";
-import { loadVoices, pickVoice, speakText, playAudio, stopAudio, stopAmbient, voicesForLang, spokenForTts, isNoiseTranscript, pullSpeakable, createSpeechQueue, analyserRms, rmsFromDb } from "../lib/voice.js";
+import { loadVoices, pickVoice, speakText, playAudio, stopAudio, stopAmbient, voicesForLang, spokenForTts, isNoiseTranscript, analyserRms, rmsFromDb } from "../lib/voice.js";
 import { startStreamingStt } from "../lib/sttStream.js";
 
 function delay(ms) {
@@ -410,36 +410,10 @@ export default function AgentStudio() {
     try {
       if (modeRef.current === "voice") {
         wantListenRef.current = true;
-        const queue = createSpeechQueue({
-          play: (chunk) => speakChunk(chunk),
-          onStart: () => {
-            speakingRef.current = true;
-            setPhase("speaking");
-            // Short protect window — long enough to skip TTS echo, short enough to interrupt greeting.
-            ignoreUntilRef.current = Date.now() + 550;
-            startBargeWatch();
-          },
-          onIdle: () => {},
-          isAborted: () => speakAbortRef.current,
-        });
-        speechQueueRef.current = queue;
         lastSpokenRef.current = "";
         ttsPrepRef.current = new Map();
 
         let display = "";
-        let ttsBuf = "";
-        const feedTts = (piece) => {
-          if (speakAbortRef.current) return;
-          ttsBuf += piece;
-          while (true) {
-            const { speakable, rest } = pullSpeakable(ttsBuf);
-            if (!speakable) break;
-            ttsBuf = rest;
-            prefetchTts(speakable);
-            queue.push(speakable);
-          }
-        };
-
         nextCall = await api.sendMessageStream(current.id, spoken, {
           source: "voice",
           signal: streamCtrl.signal,
@@ -447,22 +421,26 @@ export default function AgentStudio() {
             if (speakAbortRef.current) return;
             display += token;
             setLiveText(display.replace(/\[END:[a-z_]+\]/gi, ""));
-            feedTts(token);
           },
         });
         if (!nextCall && !speakAbortRef.current) {
           nextCall = await api.sendMessage(current.id, spoken, "voice");
           const last = [...(nextCall?.messages || [])].reverse().find((m) => m.role === "assistant");
-          if (last?.text) feedTts(last.text);
+          if (last?.text) display = last.text;
         }
-        if (!speakAbortRef.current) {
-          const { speakable, rest } = pullSpeakable(ttsBuf, { force: true });
-          if (speakable || rest) queue.push(speakable || rest);
+        const replyText = display.replace(/\[END:[a-z_]+\]/gi, "").trim();
+        if (!speakAbortRef.current && replyText) {
+          speakingRef.current = true;
+          setPhase("speaking");
+          ignoreUntilRef.current = Date.now() + 550;
+          startBargeWatch();
+          try {
+            await speakTurn(replyText);
+          } finally {
+            stopBargeWatch();
+            speakingRef.current = false;
+          }
         }
-        await queue.drain();
-        stopBargeWatch();
-        speakingRef.current = false;
-        speechQueueRef.current = null;
       } else {
         nextCall = await api.sendMessage(current.id, spoken, "chat");
       }
@@ -691,13 +669,13 @@ export default function AgentStudio() {
         const pending = prefetchTts(display) || api.speak(studioTtsPayload(display));
         const clip = await Promise.race([
           pending,
-          delay(12000).then(() => Promise.reject(new Error("Voice timed out"))),
+          delay(8000).then(() => Promise.reject(new Error("Voice timed out"))),
         ]);
         if (speakAbortRef.current) return;
         if (clip?.provider === "browser" || !clip?.audioUrl) {
           throw new Error("Selected voice is not connected. Add the API key in Settings.");
         }
-        await Promise.race([playAudio(clip.audioUrl), delay(20000)]);
+        await Promise.race([playAudio(clip.audioUrl), delay(120000)]);
       } catch (err) {
         if (!speakAbortRef.current) {
           await speakText(clean, {
@@ -723,6 +701,14 @@ export default function AgentStudio() {
     });
   }
 
+  async function speakTurn(text) {
+    if (speakAbortRef.current) return;
+    const display = String(text || "").replace(/\[END:[a-z_]+\]/gi, "").trim();
+    if (!display) return;
+    lastSpokenRef.current = display;
+    await speakChunk(display);
+  }
+
   async function speak(text) {
     wantListenRef.current = true;
     speakAbortRef.current = false;
@@ -735,34 +721,16 @@ export default function AgentStudio() {
     recognitionRef.current = null;
     const display = String(text || "").replace(/\[END:[a-z_]+\]/gi, "").trim();
     if (!display) return;
-    lastSpokenRef.current = display;
     speakingRef.current = true;
     setPhase("speaking");
     try {
       ignoreUntilRef.current = Date.now() + 550;
       startBargeWatch();
-      const queue = createSpeechQueue({
-        play: (chunk) => speakChunk(chunk),
-        isAborted: () => speakAbortRef.current,
-      });
-      speechQueueRef.current = queue;
-      let buf = display;
-      while (true) {
-        const { speakable, rest } = pullSpeakable(buf);
-        if (!speakable) break;
-        prefetchTts(speakable);
-        queue.push(speakable);
-        buf = rest;
-      }
-      if (buf.trim()) {
-        prefetchTts(buf.trim());
-        queue.push(buf.trim());
-      }
-      await queue.drain();
+      ttsPrepRef.current = new Map();
+      await speakTurn(display);
     } finally {
       stopBargeWatch();
       speakingRef.current = false;
-      speechQueueRef.current = null;
       ignoreUntilRef.current = Date.now() + 400;
     }
   }

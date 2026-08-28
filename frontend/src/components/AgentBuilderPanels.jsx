@@ -540,15 +540,15 @@ export function SettingsPanel({
           title="Voice expressiveness"
           hint={
             sarvamV3
-              ? "Keep ~0.5–0.6 so every sentence sounds like the same person. Higher values change tone between clips."
+              ? "Keep ~0.4 for one steady speaker per reply. Higher values change tone between words."
               : "Applies when using Sarvam Bulbul v3."
           }
         >
           <RangeControl
             min={0.2}
-            max={0.85}
+            max={0.75}
             step={0.05}
-            value={settings.ttsTemperature ?? 0.55}
+            value={settings.ttsTemperature ?? 0.42}
             onChange={(ttsTemperature) => set({ ttsTemperature })}
           />
         </SettingRow>

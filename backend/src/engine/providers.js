@@ -61,7 +61,7 @@ export const TTS_PROVIDERS = [
   {
     id: "sarvam",
     label: "Sarvam Bulbul",
-    hint: "Natural Indian voices (Hindi, Tamil, English-IN, and more).",
+    hint: "Best for Hindi/Telugu calls. Use Kavya or Ishita for a softer phone tone. One reply = one voice clip.",
     model: "bulbul:v3",
     env: "SARVAM_API_KEY",
     voices: [
@@ -91,19 +91,16 @@ export const TTS_PROVIDERS = [
   {
     id: "openai",
     label: "OpenAI TTS",
-    hint: "Alloy, Nova, and other OpenAI speakers.",
-    model: "tts-1",
+    hint: "Smoother English/Hinglish. Try Coral or Shimmer with tts-1-hd. Hindi accent is weaker than Bulbul.",
+    model: "tts-1-hd",
     env: "OPENAI_API_KEY",
     voices: [
       { id: "alloy", label: "Alloy (neutral)", gender: "female" },
       { id: "ash", label: "Ash (male)", gender: "male" },
-      { id: "coral", label: "Coral (female)", gender: "female" },
-      { id: "echo", label: "Echo (male)", gender: "male" },
-      { id: "fable", label: "Fable (male)", gender: "male" },
+      { id: "coral", label: "Coral (female, natural)", gender: "female" },
+      { id: "shimmer", label: "Shimmer (female, warm)", gender: "female" },
       { id: "nova", label: "Nova (female)", gender: "female" },
-      { id: "onyx", label: "Onyx (male)", gender: "male" },
       { id: "sage", label: "Sage (female)", gender: "female" },
-      { id: "shimmer", label: "Shimmer (female)", gender: "female" },
     ],
   },
 ];
