@@ -62,6 +62,13 @@ test("not-graduate is not misclassified as out-of-area", () => {
   assert.doesNotMatch(result.text, /क्षेत्र/);
 });
 
+test("plain-language lack of education is treated as not graduate", () => {
+  const text = "I didn't study at all.";
+  const intent = detectCallerIntent(text);
+  assert.equal(intent.notGraduate, true);
+  assert.equal(intent.outOfArea, false);
+});
+
 test("explicit Hindi switch returns a brief natural Hinglish reply", async () => {
   const text = "Mujhse Hindi mein baat kar sakti ho?";
   const call = firstTurn(text);

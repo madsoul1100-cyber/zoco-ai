@@ -69,7 +69,11 @@ export default function CallDetail() {
             {call.recordingUrl ? (
               <audio controls src={call.recordingUrl} style={{ width: "100%" }} />
             ) : (
-              <span className="muted">No audio file yet</span>
+              <span className="muted">
+                {["queued", "ringing", "in_progress"].includes(call.status)
+                  ? "Recording in progress — available when the call ends"
+                  : "No audio file was saved"}
+              </span>
             )}
           </div>
         </article>

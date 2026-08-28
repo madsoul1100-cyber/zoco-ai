@@ -9,7 +9,7 @@ import { GeniePanel } from "../components/GeniePanel.jsx";
 import { compileInstructions, resolveInstructionSections, splitInstructionText } from "../lib/instructionPacks.js";
 import { callSettings } from "../lib/builder.js";
 import { languageLabel } from "../lib/languages.js";
-import { loadVoices, pickVoice, speakText, playAudio, playStreamingTts, stopAudio, stopAmbient, voicesForLang, spokenForTts, isNoiseTranscript, isMeaningfulBargeIn, stripModelControlText } from "../lib/voice.js";
+import { loadVoices, pickVoice, speakText, playAudio, playStreamingTts, stopAudio, stopAmbient, voicesForLang, spokenForTts, isNoiseTranscript, isMeaningfulBargeIn, stripModelControlText, normalizeVoiceTranscript } from "../lib/voice.js";
 import { startStreamingStt } from "../lib/sttStream.js";
 
 function delay(ms) {
@@ -160,13 +160,23 @@ export default function AgentStudio() {
       setAllVoices(list);
     });
     return () => {
+      const activeCall = callRef.current;
+      const finalizeAbandonedVoice = modeRef.current === "voice"
+        && activeCall
+        && isLive(activeCall);
       wantListenRef.current = false;
       speakAbortRef.current = true;
       speechQueueRef.current?.clear();
-      stopListening();
-      stopBargeWatch();
-      stopAudio();
-      window.speechSynthesis?.cancel();
+      void (async () => {
+        await stopMic();
+        if (finalizeAbandonedVoice) {
+          await api.outcome(activeCall.id, {
+            status: "completed",
+            disposition: "dropped",
+            reason: "Voice test closed before an explicit outcome",
+          }).catch(() => {});
+        }
+      })();
     };
   }, [id]);
 
@@ -385,7 +395,7 @@ export default function AgentStudio() {
   }
 
   async function acceptUserSpeech(text, { immediate = false } = {}) {
-    const spoken = String(text || "").trim();
+    const spoken = normalizeVoiceTranscript(text);
     if (!spoken) return;
     if (speakingRef.current || speechQueueRef.current?.busy) {
       interruptSpeaking();
@@ -979,7 +989,7 @@ export default function AgentStudio() {
           if (/^(te|hi|en)-IN$/.test(String(meta.language || ""))) {
             sttLanguageHintRef.current = meta.language;
           }
-          let spoken = String(text || "").trim();
+          let spoken = normalizeVoiceTranscript(text);
           if (spoken.length < 2) return;
           const activelySpeaking = speakingRef.current || speechQueueRef.current?.busy;
           if (activelySpeaking && !isMeaningfulBargeIn(spoken)) {

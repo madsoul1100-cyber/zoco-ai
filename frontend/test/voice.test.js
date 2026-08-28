@@ -1,7 +1,13 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 
-import { isMeaningfulBargeIn, stripModelControlText } from "../src/lib/voice.js";
+import {
+  isMeaningfulBargeIn,
+  isNoiseTranscript,
+  normalizeVoiceTranscript,
+  spokenForTts,
+  stripModelControlText,
+} from "../src/lib/voice.js";
 
 test("vibration and isolated background sounds do not qualify as barge-in", () => {
   for (const sample of ["", "…", "hmm", "uh", "hello", "क्या", "background"]) {
@@ -33,4 +39,14 @@ test("model control and knowledge-query text is never shown or spoken", () => {
     "Form 18 is a registration form."
   );
   assert.equal(stripModelControlText("VOICE STREAM: preparing answer"), "");
+  assert.equal(
+    spokenForTts('Knowledge Base Query: What does "graduate" mean? A graduate has completed a degree.'),
+    "A graduate has completed a degree."
+  );
+});
+
+test("known STT corruption is repaired and filler is ignored", () => {
+  assert.equal(normalizeVoiceTranscript("Niacin साथ खोलो"), "Hindi mein baat karo");
+  assert.equal(isNoiseTranscript("Mm-"), true);
+  assert.equal(isNoiseTranscript("hmm"), true);
 });

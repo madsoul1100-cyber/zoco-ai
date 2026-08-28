@@ -187,6 +187,12 @@ const LANGUAGE_REQUESTS = [
 export function detectRequestedLanguage(text) {
   const raw = String(text || "").trim();
   if (!raw) return null;
+  if (
+    (/\bniacin\b|नियासिन/i.test(raw))
+    && /(?:saath|साथ).{0,16}(?:kholo|खोलो)/i.test(raw)
+  ) {
+    return "hi-IN";
+  }
   for (const { re, code } of LANGUAGE_REQUESTS) {
     if (re.test(raw)) return code;
   }
@@ -235,6 +241,8 @@ export function spokenForTts(text) {
   // Keep .,?!,। and commas — Bulbul uses them for natural pauses and question intonation.
   // Only strip tags, brackets, and quotes that confuse synthesis.
   return String(text || "")
+    .replace(/(?:Knowledge Base Query|VOICE STREAM|LANGUAGE LOCK)\s*:\s*[^?\n]*\?\s*/gi, "")
+    .replace(/^\s*(?:Knowledge Base Query|VOICE STREAM|LANGUAGE LOCK|Instructions?|System)\s*:\s*/gim, "")
     .replace(/\[END:[a-z_]+\]/gi, "")
     .replace(/["""''`()[\]{}]/g, " ")
     .replace(/\s+/g, " ")
@@ -252,6 +260,9 @@ function compactSpeech(text) {
 export function isNoiseTranscript(heard, lastSpoken = "") {
   const raw = String(heard || "").trim();
   if (!raw) return true;
+  if (/^(?:m+|h+m+|u+h+|u+m+)[\s.,!?-]*$/i.test(raw) || /^(?:హ్మ్|అం|हम्म|उम्)[\s.,!?-]*$/u.test(raw)) {
+    return true;
+  }
   const leftover = raw.replace(NOISE_PHRASE, " ").replace(TTS_PUNCT, " ").replace(/\s+/g, " ").trim();
   if (!leftover || leftover.length < 2 || NOISE_LEFTOVER.test(leftover)) return true;
   const heardBits = compactSpeech(raw);

@@ -332,7 +332,7 @@ export function detectCallerIntent(userText) {
   };
 
   const wrongPerson = /wrong (person|number)|galat (number|person|aadmi|banda)|गलत (नंबर|व्यक्ति|आदमी)|వేరే (వ్యక్తి|నెంబర్|వాళ్ళు)|not (me|him|her)\b|main ravi nahi (hoon|hun)|मेरा नाम नहीं|मैं रवि नहीं हूँ|मैं वो नहीं हूँ|నేను కాదు|wrong (log|banda)/i.test(text);
-  const notGraduate = /not (a )?graduate|graduate (nahi|nahin|नहीं)|ग्रेजुएट नहीं|graduation नहीं|డిగ్రీ లేదు|graduate కాదు/i.test(text);
+  const notGraduate = /not (a )?graduate|graduate (nahi|nahin|नहीं)|didn'?t study( at all)?|never studied|no degree|ग्रेजुएट नहीं|graduation नहीं|पढ़ाई नहीं की|कभी पढ़ाई नहीं|డిగ్రీ లేదు|graduate కాదు|చదువుకోలేదు|చదవలేదు/i.test(text);
   const outsideCity = /\b(chandigarh|mohali|delhi|mumbai|punjab|haryana|bangalore|bengaluru|kolkata|jaipur|pune)\b/i.test(text)
     || /चंडीगढ़|चण्डीगढ़|मोहाली|दिल्ली|मुंबई|पंजाब|हरियाणा/.test(text);
   const declineArea = /not for me|won'?t be for me|mere liye.{0,40}(nahi|nahin|नहीं)|मेरे लिए.{0,40}(नहीं|ना)|नहीं होगा|ye mere liye|यह मेरे लिए|out of (area|state|constituency)|दूसरे (शहर|राज्य)|different (city|state)|इधर का नहीं|उधर (साइड|side)|mere area|hyderabad.{0,24}(nahi|नहीं)|constituency.{0,24}(nahi|नहीं)/i.test(text);
