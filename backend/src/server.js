@@ -588,6 +588,19 @@ app.post("/api/calls/:id/connect", async (req, res) => {
   res.json(await saveCall(call));
 });
 
+function applySttLanguageHint(call, agent, rawHint) {
+  const hint = String(rawHint || "");
+  if (!/^(te|hi|en)-IN$/.test(hint)) return;
+  const settings = agent?.callSettings || {};
+  if (settings.autoDetectLanguage === false && settings.switchLanguage === false) return;
+  const allowed = Array.isArray(settings.allowedLanguages) && settings.allowedLanguages.length
+    ? settings.allowedLanguages
+    : ["te-IN", "hi-IN", "en-IN"];
+  if (!allowed.includes(hint)) return;
+  call.language = hint;
+  call._sttLanguageHint = hint;
+}
+
 app.post("/api/calls/:id/messages", async (req, res) => {
   const call = await getCall(req.params.id);
   if (!call) return res.status(404).json({ error: "Call not found" });
@@ -599,6 +612,7 @@ app.post("/api/calls/:id/messages", async (req, res) => {
   if (!userText) return res.status(400).json({ error: "Message text is required" });
 
   const agent = await getCallAgent(call);
+  applySttLanguageHint(call, agent, req.body?.languageHint);
   const source = req.body?.source || inferSource(call);
   const now = new Date().toISOString();
   call.status = "in_progress";
@@ -661,6 +675,7 @@ app.post("/api/calls/:id/messages/stream", async (req, res) => {
   if (!userText) return res.status(400).json({ error: "Message text is required" });
 
   const agent = await getCallAgent(call);
+  applySttLanguageHint(call, agent, req.body?.languageHint);
   const source = req.body?.source || inferSource(call);
   res.setHeader("Content-Type", "text/event-stream");
   res.setHeader("Cache-Control", "no-cache, no-transform");
@@ -693,8 +708,14 @@ app.post("/api/calls/:id/messages/stream", async (req, res) => {
       call,
       userText,
       knowledge,
-      onToken: (token) => emit({ type: "delta", text: token }),
+      // Voice must never expose tool/control text before parseSpoken sanitizes it.
+      onToken: source === "voice"
+        ? () => {}
+        : (token) => emit({ type: "delta", text: token }),
     });
+    if (source === "voice" && reply.text) {
+      emit({ type: "delta", text: reply.text });
+    }
 
     call.gathered = { ...(call.gathered || {}), ...(reply.slots || {}) };
     call.llm = { provider: reply.provider, model: reply.model || null };
@@ -781,7 +802,11 @@ app.post("/api/calls/:id/recording", upload.single("audio"), async (req, res) =>
     callId: call.id,
     buffer: req.file.buffer,
     contentType: req.file.mimetype || "audio/webm",
-    ext: "webm",
+    ext: req.file.mimetype?.includes("mp4")
+      ? "mp4"
+      : req.file.mimetype?.includes("ogg")
+        ? "ogg"
+        : "webm",
   });
   call.recordingUrl = `/api/calls/${call.id}/recording`;
   call.recordingKey = stored.key;

@@ -26,14 +26,23 @@ export const api = {
   call: (id) => request(`/api/calls/${id}`),
   startCall: (payload) => request("/api/calls", { method: "POST", body: JSON.stringify(payload) }),
   connect: (id) => request(`/api/calls/${id}/connect`, { method: "POST", body: "{}" }),
-  sendMessage: (id, text, source = "chat") =>
-    request(`/api/calls/${id}/messages`, { method: "POST", body: JSON.stringify({ text, source }) }),
-  sendMessageStream: async (id, text, { onDelta, onUser, source = "chat", signal } = {}) => {
+  sendMessage: (id, text, source = "chat", languageHint = "") =>
+    request(`/api/calls/${id}/messages`, {
+      method: "POST",
+      body: JSON.stringify({ text, source, languageHint: languageHint || undefined }),
+    }),
+  sendMessageStream: async (id, text, {
+    onDelta,
+    onUser,
+    source = "chat",
+    signal,
+    languageHint = "",
+  } = {}) => {
     const response = await fetch(`/api/calls/${id}/messages/stream`, {
       method: "POST",
       credentials: "include",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ text, source }),
+      body: JSON.stringify({ text, source, languageHint: languageHint || undefined }),
       signal,
     });
     if (!response.ok || !response.body) {
@@ -163,7 +172,12 @@ export const api = {
   deleteMember: (id) => request(`/api/members/${id}`, { method: "DELETE" }),
   uploadRecording: async (id, blob) => {
     const data = new FormData();
-    data.append("audio", blob, `${id}.webm`);
+    const ext = String(blob?.type || "").includes("mp4")
+      ? "mp4"
+      : String(blob?.type || "").includes("ogg")
+        ? "ogg"
+        : "webm";
+    data.append("audio", blob, `${id}.${ext}`);
     const response = await fetch(`/api/calls/${id}/recording`, { method: "POST", body: data, credentials: "include" });
     if (!response.ok) throw new Error("Recording upload failed");
     return response.json();

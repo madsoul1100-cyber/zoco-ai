@@ -3,6 +3,7 @@ import assert from "node:assert/strict";
 
 import {
   detectCallerIntent,
+  followCustomerLanguage,
   guardEarlyHangup,
   intentDrivenReply,
   parseSpoken,
@@ -134,4 +135,19 @@ test("Priya silence nudges follow the active call language", () => {
   };
   const result = silenceAction({ language: "hi-IN", nudgeIndex: 0 }, configured);
   assert.equal(result.text, "हैलो, आप सुन रहे हैं?");
+});
+
+test("Sarvam language hint keeps Telugu speech in Telugu despite Latin transcript", () => {
+  const call = {
+    language: "te-IN",
+    _sttLanguageHint: "te-IN",
+  };
+  const language = followCustomerLanguage(
+    call,
+    agent,
+    "I am asking why you called me"
+  );
+  assert.equal(language, "te-IN");
+  assert.equal(call.language, "te-IN");
+  assert.equal("_sttLanguageHint" in call, false);
 });

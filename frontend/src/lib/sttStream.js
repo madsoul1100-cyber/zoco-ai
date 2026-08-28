@@ -50,6 +50,7 @@ function wsUrl(language, eagerness) {
  * @param {(err: string) => void} [opts.onError]
  * @param {() => void} [opts.onReady]
  * @param {() => boolean} [opts.shouldSend] return false to mute uplink (still keep socket)
+ * @param {MediaStream} [opts.mediaStream] shared mic stream (for call recording)
  */
 export async function startStreamingStt({
   language = "auto",
@@ -62,12 +63,14 @@ export async function startStreamingStt({
   onVadEnd,
   onClose,
   shouldSend,
+  mediaStream,
 } = {}) {
   if (!navigator.mediaDevices?.getUserMedia) {
     throw new Error("Microphone is not available in this browser.");
   }
 
-  const stream = await navigator.mediaDevices.getUserMedia({
+  const ownsStream = !mediaStream;
+  const stream = mediaStream || await navigator.mediaDevices.getUserMedia({
     audio: {
       channelCount: 1,
       echoCancellation: true,
@@ -197,7 +200,7 @@ export async function startStreamingStt({
       } catch {
         /* ignore */
       }
-      stream.getTracks().forEach((track) => track.stop());
+      if (ownsStream) stream.getTracks().forEach((track) => track.stop());
     },
   };
 }

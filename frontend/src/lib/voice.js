@@ -21,6 +21,16 @@ export function isMeaningfulBargeIn(text) {
   return words.length >= 2 && normalized.length >= 5;
 }
 
+export function stripModelControlText(text) {
+  return String(text || "")
+    .replace(
+      /^\s*(?:knowledge(?:\s+base(?:\s+query)?)?|voice(?:\s+stream)?|language(?:\s+lock)?|instructions?|system)\b[^\n]*(?:\n|$)/gim,
+      ""
+    )
+    .replace(/\[END:[a-z_]+\]/gi, "")
+    .trimStart();
+}
+
 export function loadVoices() {
   return new Promise((resolve) => {
     const current = window.speechSynthesis?.getVoices?.() || [];
@@ -76,6 +86,18 @@ export function pickVoice(voices, preferredName, lang = "en-IN") {
 let currentPlayer = null;
 let ambientPlayer = null;
 
+function connectRecordingCapture(audio, context, destination) {
+  if (!audio || !context || !destination) return null;
+  try {
+    const source = context.createMediaElementSource(audio);
+    source.connect(context.destination);
+    source.connect(destination);
+    return source;
+  } catch {
+    return null;
+  }
+}
+
 export function stopAudio() {
   if (!currentPlayer) return;
   const player = currentPlayer;
@@ -102,7 +124,11 @@ function base64Bytes(value) {
  * Progressive Sarvam TTS playback. Audio starts on the first MP3 chunk instead
  * of waiting for a complete REST-generated file.
  */
-export function playStreamingTts(payload, { firstAudioTimeoutMs = 10000 } = {}) {
+export function playStreamingTts(payload, {
+  firstAudioTimeoutMs = 10000,
+  captureContext,
+  captureDestination,
+} = {}) {
   return new Promise((resolve, reject) => {
     if (!window.MediaSource?.isTypeSupported?.("audio/mpeg")) {
       reject(new Error("Streaming audio is not supported by this browser."));
@@ -119,6 +145,7 @@ export function playStreamingTts(payload, { firstAudioTimeoutMs = 10000 } = {}) 
     const audio = new Audio(objectUrl);
     audio.preload = "auto";
     currentPlayer = audio;
+    const captureSource = connectRecordingCapture(audio, captureContext, captureDestination);
 
     let sourceBuffer = null;
     let settled = false;
@@ -143,6 +170,11 @@ export function playStreamingTts(payload, { firstAudioTimeoutMs = 10000 } = {}) 
         /* ignore */
       }
       if (currentPlayer === audio) currentPlayer = null;
+      try {
+        captureSource?.disconnect();
+      } catch {
+        /* ignore */
+      }
       setTimeout(() => URL.revokeObjectURL(objectUrl), 0);
       fn(value);
     };
@@ -258,7 +290,11 @@ export function startAmbient(url, volume = 0.12) {
   return audio;
 }
 
-export function playAudio(url, { timeoutMs = 120000 } = {}) {
+export function playAudio(url, {
+  timeoutMs = 120000,
+  captureContext,
+  captureDestination,
+} = {}) {
   return new Promise((resolve, reject) => {
     if (!url) return reject(new Error("No audio to play"));
     window.speechSynthesis?.cancel();
@@ -266,6 +302,7 @@ export function playAudio(url, { timeoutMs = 120000 } = {}) {
     const audio = new Audio(url);
     audio.preload = "auto";
     currentPlayer = audio;
+    const captureSource = connectRecordingCapture(audio, captureContext, captureDestination);
     let settled = false;
     const finish = (fn, value) => {
       if (settled) return;
@@ -279,6 +316,11 @@ export function playAudio(url, { timeoutMs = 120000 } = {}) {
           /* ignore */
         }
         currentPlayer = null;
+      }
+      try {
+        captureSource?.disconnect();
+      } catch {
+        /* ignore */
       }
       fn(value);
     };

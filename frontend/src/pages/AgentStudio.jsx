@@ -9,7 +9,7 @@ import { GeniePanel } from "../components/GeniePanel.jsx";
 import { compileInstructions, resolveInstructionSections, splitInstructionText } from "../lib/instructionPacks.js";
 import { callSettings } from "../lib/builder.js";
 import { languageLabel } from "../lib/languages.js";
-import { loadVoices, pickVoice, speakText, playAudio, playStreamingTts, stopAudio, stopAmbient, voicesForLang, spokenForTts, isNoiseTranscript, isMeaningfulBargeIn } from "../lib/voice.js";
+import { loadVoices, pickVoice, speakText, playAudio, playStreamingTts, stopAudio, stopAmbient, voicesForLang, spokenForTts, isNoiseTranscript, isMeaningfulBargeIn, stripModelControlText } from "../lib/voice.js";
 import { startStreamingStt } from "../lib/sttStream.js";
 
 function delay(ms) {
@@ -99,6 +99,11 @@ export default function AgentStudio() {
   const [pendingUserText, setPendingUserText] = useState("");
   const recorder = useRef(null);
   const chunks = useRef([]);
+  const micStreamRef = useRef(null);
+  const recordingDoneRef = useRef(null);
+  const recordingAudioContextRef = useRef(null);
+  const recordingDestinationRef = useRef(null);
+  const recordingMicSourceRef = useRef(null);
   const callRef = useRef(null);
   const speakingRef = useRef(false);
   const recognitionRef = useRef(null);
@@ -128,6 +133,7 @@ export default function AgentStudio() {
   const coalesceTimerRef = useRef(null);
   const bargeCandidateRef = useRef({ text: "", since: 0, updates: 0 });
   const acceptedBargeTextRef = useRef("");
+  const sttLanguageHintRef = useRef("");
   const [tab, setTab] = useState(() => {
     const requested = searchParams.get("tab");
     if (requested && RAIL.some((item) => item.id === requested)) return requested;
@@ -349,7 +355,7 @@ export default function AgentStudio() {
     }
     const next = { ...previous, text: candidate, updates: previous.updates + 1 };
     bargeCandidateRef.current = next;
-    return next.updates >= 2 && Date.now() - next.since >= 180;
+    return next.updates >= 2;
   }
 
   function coalesceMs() {
@@ -409,6 +415,8 @@ export default function AgentStudio() {
       return;
     }
     sendingRef.current = true;
+    const languageHint = sttLanguageHintRef.current;
+    sttLanguageHintRef.current = "";
     pendingUserRef.current = "";
     speakAbortRef.current = false;
     clearTimeout(silenceRef.current);
@@ -440,18 +448,20 @@ export default function AgentStudio() {
         nextCall = await api.sendMessageStream(current.id, spoken, {
           source: "voice",
           signal: streamCtrl.signal,
+          languageHint,
           onDelta: (token) => {
             if (speakAbortRef.current) return;
             display += token;
-            setLiveText(display.replace(/\[END:[a-z_]+\]/gi, ""));
+            setLiveText(stripModelControlText(display));
           },
         });
         if (!nextCall && !speakAbortRef.current) {
-          nextCall = await api.sendMessage(current.id, spoken, "voice");
+          nextCall = await api.sendMessage(current.id, spoken, "voice", languageHint);
           const last = [...(nextCall?.messages || [])].reverse().find((m) => m.role === "assistant");
           if (last?.text) display = last.text;
         }
-        const replyText = display.replace(/\[END:[a-z_]+\]/gi, "").trim();
+        const finalAssistant = [...(nextCall?.messages || [])].reverse().find((m) => m.role === "assistant");
+        const replyText = String(finalAssistant?.text || stripModelControlText(display)).trim();
         if (!speakAbortRef.current && replyText) {
           speakingRef.current = true;
           setPhase("speaking");
@@ -491,6 +501,7 @@ export default function AgentStudio() {
           if (!barged) await delay(250);
           resumeListening();
         } else {
+          await stopMic();
           setPhase("idle");
         }
       } else {
@@ -549,24 +560,80 @@ export default function AgentStudio() {
   async function startMic(callId) {
     if (!navigator.mediaDevices?.getUserMedia) return;
     const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
-    const media = new MediaRecorder(stream);
+    micStreamRef.current = stream;
+    let recordingStream = stream;
+    const AudioContext = window.AudioContext || window.webkitAudioContext;
+    if (AudioContext) {
+      const context = new AudioContext();
+      if (context.state === "suspended") await context.resume().catch(() => {});
+      const destination = context.createMediaStreamDestination();
+      const micSource = context.createMediaStreamSource(stream);
+      micSource.connect(destination);
+      recordingAudioContextRef.current = context;
+      recordingDestinationRef.current = destination;
+      recordingMicSourceRef.current = micSource;
+      recordingStream = destination.stream;
+    }
+    const preferredType = [
+      "audio/webm;codecs=opus",
+      "audio/webm",
+      "audio/mp4",
+    ].find((type) => window.MediaRecorder?.isTypeSupported?.(type));
+    const media = preferredType
+      ? new MediaRecorder(recordingStream, { mimeType: preferredType })
+      : new MediaRecorder(recordingStream);
     chunks.current = [];
     media.ondataavailable = (event) => {
       if (event.data.size) chunks.current.push(event.data);
     };
-    media.onstop = async () => {
-      const blob = new Blob(chunks.current, { type: "audio/webm" });
-      if (blob.size) {
+    recordingDoneRef.current = new Promise((resolve) => {
+      media.onstop = async () => {
+        const blob = new Blob(chunks.current, { type: media.mimeType || "audio/webm" });
         try {
-          await api.uploadRecording(callId, blob);
-        } catch {
-          /* optional */
+          if (blob.size) {
+            const saved = await api.uploadRecording(callId, blob);
+            if (callRef.current?.id === callId) {
+              callRef.current = saved;
+              setCall(saved);
+            }
+          }
+        } catch (err) {
+          setError(err?.message || "Call recording could not be saved.");
+        } finally {
+          try {
+            recordingMicSourceRef.current?.disconnect();
+          } catch {
+            /* ignore */
+          }
+          recordingStream.getTracks().forEach((track) => track.stop());
+          stream.getTracks().forEach((track) => track.stop());
+          await recordingAudioContextRef.current?.close().catch(() => {});
+          recordingAudioContextRef.current = null;
+          recordingDestinationRef.current = null;
+          recordingMicSourceRef.current = null;
+          if (micStreamRef.current === stream) micStreamRef.current = null;
+          resolve();
         }
-      }
-      stream.getTracks().forEach((track) => track.stop());
-    };
+      };
+      media.onerror = () => {
+        setError("Call recording stopped unexpectedly.");
+        try {
+          recordingMicSourceRef.current?.disconnect();
+        } catch {
+          /* ignore */
+        }
+        recordingStream.getTracks().forEach((track) => track.stop());
+        stream.getTracks().forEach((track) => track.stop());
+        recordingAudioContextRef.current?.close().catch(() => {});
+        recordingAudioContextRef.current = null;
+        recordingDestinationRef.current = null;
+        recordingMicSourceRef.current = null;
+        if (micStreamRef.current === stream) micStreamRef.current = null;
+        resolve();
+      };
+    });
     recorder.current = media;
-    media.start();
+    media.start(1000);
   }
 
   async function stopMic() {
@@ -588,7 +655,13 @@ export default function AgentStudio() {
     speakingRef.current = false;
     stopAudio();
     stopAmbient();
+    const recordingDone = recordingDoneRef.current;
     if (recorder.current?.state === "recording") recorder.current.stop();
+    if (recordingDone) await Promise.race([recordingDone, delay(15000)]);
+    recorder.current = null;
+    recordingDoneRef.current = null;
+    micStreamRef.current?.getTracks().forEach((track) => track.stop());
+    micStreamRef.current = null;
     window.speechSynthesis?.cancel();
   }
 
@@ -668,6 +741,13 @@ export default function AgentStudio() {
     };
   }
 
+  function recordingCaptureOptions() {
+    return {
+      captureContext: recordingAudioContextRef.current,
+      captureDestination: recordingDestinationRef.current,
+    };
+  }
+
   function prefetchTts(text) {
     const display = String(text || "").replace(/\[END:[a-z_]+\]/gi, "").trim();
     if (!display) return null;
@@ -708,7 +788,7 @@ export default function AgentStudio() {
             temperature: Number(settings.ttsTemperature ?? 0.42),
             dictId: settings.sarvamDictId || "",
             pronunciations: settings.pronunciations || null,
-          });
+          }, recordingCaptureOptions());
         } else {
           const pending = prefetchTts(display) || api.speak(studioTtsPayload(display));
           const clip = await Promise.race([
@@ -719,13 +799,13 @@ export default function AgentStudio() {
           if (clip?.provider === "browser" || !clip?.audioUrl) {
             throw new Error("Selected voice is not connected. Add the API key in Settings.");
           }
-          await Promise.race([playAudio(clip.audioUrl), delay(120000)]);
+          await Promise.race([playAudio(clip.audioUrl, recordingCaptureOptions()), delay(120000)]);
         }
       } catch (err) {
         if (!speakAbortRef.current) {
           try {
             const clip = await api.speak(studioTtsPayload(display));
-            if (clip?.audioUrl) await playAudio(clip.audioUrl);
+            if (clip?.audioUrl) await playAudio(clip.audioUrl, recordingCaptureOptions());
             else throw new Error("No connected voice.");
           } catch {
             await speakText(clean, {
@@ -863,6 +943,7 @@ export default function AgentStudio() {
       const session = await startStreamingStt({
         language: sttLanguage(),
         eagerness: callSettings(agentRef.current).eagerness,
+        mediaStream: micStreamRef.current,
         shouldSend: allowUplink,
         onReady: () => {
           if (asrGenerationRef.current === loopId) {
@@ -892,9 +973,12 @@ export default function AgentStudio() {
           setHeardText(text);
           clearNudgeTimer();
         },
-        onFinal: async (text) => {
+        onFinal: async (text, meta = {}) => {
           if (!wantListenRef.current || asrGenerationRef.current !== loopId) return;
           if (Date.now() < ignoreUntilRef.current) return;
+          if (/^(te|hi|en)-IN$/.test(String(meta.language || ""))) {
+            sttLanguageHintRef.current = meta.language;
+          }
           let spoken = String(text || "").trim();
           if (spoken.length < 2) return;
           const activelySpeaking = speakingRef.current || speechQueueRef.current?.busy;

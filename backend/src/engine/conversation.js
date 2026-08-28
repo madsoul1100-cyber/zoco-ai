@@ -482,11 +482,15 @@ export function followCustomerLanguage(call, agent, userText) {
   const settings = agent?.callSettings || {};
   const current = call?.language || agent?.language || "en-IN";
   const requested = detectRequestedLanguage(userText);
+  const sttHint = /^(te|hi|en)-IN$/.test(String(call?._sttLanguageHint || ""))
+    ? call._sttLanguageHint
+    : "";
+  if (call) delete call._sttLanguageHint;
   if (settings.switchLanguage === false && !requested) {
     if (call) call.language = current;
     return current;
   }
-  const detected = requested || (settings.autoDetectLanguage === false
+  const detected = requested || sttHint || (settings.autoDetectLanguage === false
     ? current
     : detectLanguageFromText(userText, current));
   const allowed = settings.allowedLanguages;

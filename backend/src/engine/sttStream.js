@@ -14,7 +14,10 @@ function silenceMsFromEagerness(eagerness) {
 
 function buildSarvamUrl({ language = "auto", eagerness = 7 } = {}) {
   const params = new URLSearchParams({
-    language_code: language === "auto" ? "auto" : sarvamTtsLanguage(language),
+    // Sarvam uses "unknown" (not "auto") for realtime language detection.
+    language_code: language === "auto" || language === "unknown"
+      ? "unknown"
+      : sarvamTtsLanguage(language),
     model: "saaras:v3-realtime",
     stream_type: "fast",
     // Keep English in Latin + Hindi/Telugu in native script (avoids "बट" / "आई गेस").
@@ -23,9 +26,9 @@ function buildSarvamUrl({ language = "auto", eagerness = 7 } = {}) {
     encoding: "linear16",
     sample_rate: "16000",
     // Reject room noise and distant voices; close-mic speech still clears this.
-    threshold: "0.42",
+    threshold: "0.36",
     silence_duration_ms: String(silenceMsFromEagerness(eagerness)),
-    min_speech_duration_ms: "240",
+    min_speech_duration_ms: "180",
   });
   return `${SARVAM_REALTIME}?${params.toString()}`;
 }
@@ -153,16 +156,16 @@ export function mountSttStream(server) {
       if (event === "transcript.partial") {
         client.send(JSON.stringify({
           type: "partial",
-          text: String(msg.text || "").trim(),
-          language: msg.language || null,
+          text: String(msg.text || msg.transcript || msg.data?.text || msg.data?.transcript || "").trim(),
+          language: msg.language_code || msg.language || msg.data?.language_code || msg.data?.language || null,
         }));
         return;
       }
       if (event === "transcript.final") {
         client.send(JSON.stringify({
           type: "final",
-          text: String(msg.text || "").trim(),
-          language: msg.language || null,
+          text: String(msg.text || msg.transcript || msg.data?.text || msg.data?.transcript || "").trim(),
+          language: msg.language_code || msg.language || msg.data?.language_code || msg.data?.language || null,
         }));
         return;
       }
