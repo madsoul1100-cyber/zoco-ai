@@ -39,9 +39,17 @@ export function silenceAction(call, agent, { missedFallback = "" } = {}) {
 
   if (index < nudges.length) {
     const nudge = nudges[index];
+    const language = call?.language || agent?.language || "en-IN";
+    const localized = agent?.id === "agt_priya_mlc_outbound"
+      ? language === "hi-IN"
+        ? (index === 0 ? "हैलो, आप सुन रहे हैं?" : "हैलो?")
+        : language === "te-IN"
+          ? (index === 0 ? "హలో అండి, వింటున్నారా?" : "హలో అండి?")
+          : ""
+      : "";
     return {
       kind: "nudge",
-      text: String(nudge.message || "").trim(),
+      text: localized || String(nudge.message || "").trim(),
       hangup: false,
       nextIndex: index + 1,
       afterSeconds: Number(nudge.afterSeconds || 5),

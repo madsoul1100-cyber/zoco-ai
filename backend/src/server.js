@@ -9,6 +9,7 @@ import { applyOutcome, dashboardStats, DISPOSITIONS } from "./engine/rules.js";
 import { publicProviderCatalog, resolveLlmConfig } from "./engine/providers.js";
 import { sttReady, transcribeAudio, transcribeFromUrl } from "./engine/stt.js";
 import { mountSttStream } from "./engine/sttStream.js";
+import { mountTtsStream } from "./engine/ttsStream.js";
 import { QUIET_OFFICE_PATH } from "./engine/ambient.js";
 import { callTimedOut, isMachineAnswer, silenceAction, voicemailMessage } from "./engine/callBehavior.js";
 import { getTtsClip, synthesizeSpeech } from "./engine/tts.js";
@@ -682,7 +683,7 @@ app.post("/api/calls/:id/messages/stream", async (req, res) => {
     emit({ type: "user", text: userText });
 
     // Skip KB retrieval on short/ack turns — it blocks time-to-first-token.
-    const needsKb = /form\s*18|mlc|register|constituency|graduate|election|ఫారం|ఎన్నిక|జిల్లా|year|డిస్ట్రిక్ట్|voter|ఓటర్/i.test(userText)
+    const needsKb = /form\s*18|mlc|register|constituency|graduate|election|voter|amarnath|sarangula|eligib|document|deadline|last date|official link|ఫారం|ఎన్నిక|జిల్లా|డిస్ట్రిక్ట్|ఓటర్|అమర్నాథ్|అర్హత|పత్రాలు|ग्रेजुएट|चुनाव|मतदाता|अमरनाथ|योग्यता|दस्तावेज|आखिरी तारीख|year/i.test(userText)
       || userText.length > 48;
     const knowledge = needsKb
       ? await knowledgeContextForAgent(agent, userText, { limit: 2, maxChars: 1600 })
@@ -1090,7 +1091,8 @@ app.post("/webhooks/twilio/gather", async (req, res) => {
     return sendTwiml(res, await spokenTwiml({ agent, say: "Thank you for your time. Goodbye.", language: startLanguage, hangup: true }));
   }
 
-  const spoken = await speechFromTwilio(req, startLanguage);
+  const sttLanguage = agent?.callSettings?.autoDetectLanguage ? "unknown" : startLanguage;
+  const spoken = await speechFromTwilio(req, sttLanguage);
 
   if (!spoken || isNoiseTranscript(spoken, call.messages?.filter((m) => m.role === "assistant").at(-1)?.text)) {
     const action = silenceAction(call, agent, { missedFallback: spokenLang.missed });
@@ -1347,6 +1349,7 @@ const boot = async () => {
   }
   const server = http.createServer(app);
   mountSttStream(server);
+  mountTtsStream(server);
   server.listen(PORT, () => {
     console.log(`Zoco AI API on http://localhost:${PORT}`);
   });

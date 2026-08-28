@@ -9,6 +9,18 @@ const PREFERRED_VOICES = [
   "Victoria",
 ];
 
+export function isMeaningfulBargeIn(text) {
+  const normalized = String(text || "")
+    .toLowerCase()
+    .replace(/[^\p{L}\p{M}\p{N}'’]+/gu, " ")
+    .trim();
+  if (!normalized) return false;
+  const strongCommand = /^(stop|please stop|no|nope|wait|hold on|रुको|रुकिए|बस|नहीं|मत बोलो|ఆపు|వద్దు|చాలు)$/iu;
+  if (strongCommand.test(normalized)) return true;
+  const words = normalized.match(/[\p{L}\p{M}\p{N}'’]+/gu) || [];
+  return words.length >= 2 && normalized.length >= 5;
+}
+
 export function loadVoices() {
   return new Promise((resolve) => {
     const current = window.speechSynthesis?.getVoices?.() || [];
@@ -66,15 +78,159 @@ let ambientPlayer = null;
 
 export function stopAudio() {
   if (!currentPlayer) return;
+  const player = currentPlayer;
+  currentPlayer = null;
   try {
-    currentPlayer._zocoStopped = true;
-    currentPlayer.pause();
-    currentPlayer.removeAttribute("src");
-    currentPlayer.load();
+    player._zocoStopped = true;
+    player._zocoClose?.();
+    player.pause();
+    player.removeAttribute("src");
+    player.load();
   } catch {
     /* ignore */
   }
-  currentPlayer = null;
+}
+
+function base64Bytes(value) {
+  const binary = atob(String(value || ""));
+  const bytes = new Uint8Array(binary.length);
+  for (let i = 0; i < binary.length; i += 1) bytes[i] = binary.charCodeAt(i);
+  return bytes;
+}
+
+/**
+ * Progressive Sarvam TTS playback. Audio starts on the first MP3 chunk instead
+ * of waiting for a complete REST-generated file.
+ */
+export function playStreamingTts(payload, { firstAudioTimeoutMs = 10000 } = {}) {
+  return new Promise((resolve, reject) => {
+    if (!window.MediaSource?.isTypeSupported?.("audio/mpeg")) {
+      reject(new Error("Streaming audio is not supported by this browser."));
+      return;
+    }
+
+    stopAudio();
+    window.speechSynthesis?.cancel();
+
+    const proto = window.location.protocol === "https:" ? "wss:" : "ws:";
+    const socket = new WebSocket(`${proto}//${window.location.host}/api/tts/stream`);
+    const mediaSource = new MediaSource();
+    const objectUrl = URL.createObjectURL(mediaSource);
+    const audio = new Audio(objectUrl);
+    audio.preload = "auto";
+    currentPlayer = audio;
+
+    let sourceBuffer = null;
+    let settled = false;
+    let streamDone = false;
+    let playbackStarted = false;
+    let receivedAudio = false;
+    const chunks = [];
+    const timer = setTimeout(() => {
+      finish(reject, new Error("Streaming voice timed out."));
+    }, firstAudioTimeoutMs);
+
+    const finish = (fn, value) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      try {
+        if (socket.readyState === WebSocket.OPEN) {
+          socket.send(JSON.stringify({ type: "stop" }));
+        }
+        socket.close();
+      } catch {
+        /* ignore */
+      }
+      if (currentPlayer === audio) currentPlayer = null;
+      setTimeout(() => URL.revokeObjectURL(objectUrl), 0);
+      fn(value);
+    };
+
+    const maybePlay = () => {
+      if (playbackStarted || !receivedAudio || audio._zocoStopped) return;
+      playbackStarted = true;
+      audio.play().catch((error) => {
+        finish(reject, new Error(error.message || "Could not play streaming voice."));
+      });
+    };
+
+    const appendNext = () => {
+      if (!sourceBuffer || sourceBuffer.updating || settled) return;
+      if (chunks.length) {
+        const chunk = chunks.shift();
+        try {
+          sourceBuffer.appendBuffer(chunk);
+        } catch (error) {
+          finish(reject, error);
+        }
+        return;
+      }
+      if (streamDone && mediaSource.readyState === "open") {
+        try {
+          mediaSource.endOfStream();
+        } catch {
+          /* updateend will retry */
+        }
+      }
+    };
+
+    audio._zocoClose = () => finish(resolve);
+    audio.onended = () => finish(resolve);
+    audio.onerror = () => {
+      if (audio._zocoStopped) finish(resolve);
+      else finish(reject, new Error("Could not play streaming voice."));
+    };
+
+    mediaSource.addEventListener("sourceopen", () => {
+      if (settled) return;
+      try {
+        sourceBuffer = mediaSource.addSourceBuffer("audio/mpeg");
+        sourceBuffer.mode = "sequence";
+        sourceBuffer.addEventListener("updateend", () => {
+          maybePlay();
+          appendNext();
+        });
+        sourceBuffer.addEventListener("error", () => {
+          finish(reject, new Error("Streaming audio buffer failed."));
+        });
+        appendNext();
+      } catch (error) {
+        finish(reject, error);
+      }
+    }, { once: true });
+
+    socket.onmessage = (event) => {
+      let message = null;
+      try {
+        message = JSON.parse(String(event.data || ""));
+      } catch {
+        return;
+      }
+      if (message.type === "ready") {
+        socket.send(JSON.stringify({ type: "start", ...payload }));
+        return;
+      }
+      if (message.type === "audio" && message.audio) {
+        receivedAudio = true;
+        clearTimeout(timer);
+        chunks.push(base64Bytes(message.audio));
+        appendNext();
+        return;
+      }
+      if (message.type === "done") {
+        streamDone = true;
+        appendNext();
+        return;
+      }
+      if (message.type === "error") {
+        finish(reject, new Error(message.error || "Streaming voice failed."));
+      }
+    };
+    socket.onerror = () => {
+      if (!receivedAudio) finish(reject, new Error("Streaming voice connection failed."));
+    };
+  });
 }
 
 export function stopAmbient() {

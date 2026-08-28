@@ -42,6 +42,35 @@ function compiledAgentInstructions(agent) {
   return String(agent?.instructions || "").trim();
 }
 
+function voiceAgentInstructions(agent) {
+  const sections = Array.isArray(agent?.instructionSections) ? agent.instructionSections : [];
+  if (!sections.length) return compiledAgentInstructions(agent).slice(0, 5500);
+  const priorities = new Set([
+    "Priority on every caller turn",
+    "Voice, emotion and spoken shape",
+    "Language continuity",
+    "Configured personalized greeting",
+    "Opening interruption repair",
+    "Objection handling",
+    "Speech normalization",
+    "Repair",
+    "Ending",
+  ]);
+  return sections
+    .filter((section) => priorities.has(String(section?.title || "").trim()))
+    .map((section) => {
+      const title = String(section.title || "").trim();
+      const limits = {
+        "Priority on every caller turn": 1500,
+        "Language continuity": 1700,
+        "Ending": 1700,
+      };
+      return `${title}\n${String(section.body || "").slice(0, limits[title] || 900)}`;
+    })
+    .join("\n\n")
+    .slice(0, 9000);
+}
+
 function workflowInstruction(agent) {
   const nodes = Array.isArray(agent?.workflow?.nodes) ? agent.workflow.nodes : [];
   if (!agent?.workflow?.enabled || !nodes.length) return "";
@@ -105,10 +134,7 @@ function languageLock(agent) {
 export function buildModelMessages({ agent, history, userText, slots, knowledge }) {
   const rich = Array.isArray(agent?.instructionSections) && agent.instructionSections.length > 0;
   const voiceStream = Boolean(agent?._voiceStream);
-  let compiled = compiledAgentInstructions(agent);
-  if (voiceStream && compiled.length > 2000) {
-    compiled = `${compiled.slice(0, 2000)}\n…(trimmed for voice latency — keep Opening/Pitch/Ending rules)`;
-  }
+  const compiled = voiceStream ? voiceAgentInstructions(agent) : compiledAgentInstructions(agent);
   const system = [
     `You are ${agent.name}, on a live phone call.`,
     rich
@@ -120,8 +146,9 @@ Hard speech rules from the Instructions (never break these):
 - On refusal / not interested / out-of-area / wrong person / opt-out: acknowledge what they said, speak a short closing in the ACTIVE language, then end with the correct [END:...] tag.
 - Never mark wrong_person unless they clearly say a different person answered or the number is wrong.
 - If they live outside the constituency or say this is not for them, end as not_interested — do not keep pitching.
-- After a language switch, answer them in that language. Never ask generic how-can-I-help.
+- After a language switch, do not repeat the introduction. Briefly confirm the language, explain the Graduate MLC purpose, and ask permission.
 - When the active language is Hindi, speak only Devanagari Hindi until another language is requested.
+- In Hindi, keep normal Indian English terms in Latin script: Graduate MLC, voter registration, Form 18, quality, WhatsApp. Never transliterate them as ग्रेजुएट, एमएलसी, वोटर, रजिस्ट्रेशन, फॉर्म, क्वालिटी.
 - When the active language is English, speak natural Indian English only until another language is requested.
 - Never invent DOB, KYC, bank, or address-collection questions — stay on Graduate MLC awareness only.`
       : `You work for the business in the use case. Sound like a real agency person, not a generic assistant. One or two short sentences. Never more than 25 words.`,
@@ -190,14 +217,26 @@ Hard speech rules from the Instructions (never break these):
 
 function sanitizeSpoken(text, language = "te-IN") {
   let next = String(text || "")
+    .replace(/^\s*(?:VOICE STREAM|Knowledge Base Query|LANGUAGE LOCK|Instructions?|System)\s*:\s*[^\n]*\n?/gim, "")
     .replace(/ధన్యవాదాలు\.?/g, "")
     .replace(/అప్లికేషన్\s*ఫారం|అప్లికేషన్\s*ఫార్మ్|ఫార్మే|ఫార్మ్|ఫారం/g, "Form 18")
     .replace(/\bForm\s*18\s*Form\s*18\b/gi, "Form 18")
     .replace(/[ \t]{2,}/g, " ")
     .replace(/\s+([,.;])/g, "$1")
     .trim();
+  const code = getLanguage(language).code;
+  if (code === "hi-IN") {
+    next = next
+      .replace(/ग्रेजुएट/gi, "Graduate")
+      .replace(/एम\.?\s*एल\.?\s*सी\.?|एमएलसी/gi, "MLC")
+      .replace(/वोटर/gi, "voter")
+      .replace(/रजिस्ट्रेशन|पंजीकरण/gi, "registration")
+      .replace(/फॉर्म\s*18/gi, "Form 18")
+      .replace(/क्वालिटी/gi, "quality")
+      .replace(/व्हाट्सऐप|व्हाट्सएप/gi, "WhatsApp");
+  }
   // Only repair corrupted Telugu endings when Telugu is active.
-  if (getLanguage(language).code === "te-IN") {
+  if (code === "te-IN") {
     next = next
       .replace(/सరే\s*అండి\.?/g, "సరే అండి.")
       .replace(/सारे\s*अंडी\.?|सरे\s*अंडी\.?|सरे\s*अन्डि\.?/gi, "సరే అండి.");
@@ -272,7 +311,7 @@ function enforceClosingLine(parsed, language = "te-IN") {
 
 export function guardEarlyHangup(parsed, call) {
   const userTurns = (call?.messages || []).filter((m) => m.role === "user").length;
-  const allowed = ["not_interested", "do_not_call"];
+  const allowed = ["not_interested", "do_not_call", "wrong_person", "callback_requested"];
   if (parsed.endCall && userTurns < 2 && !allowed.includes(parsed.disposition)) {
     return { ...parsed, endCall: false, disposition: null };
   }
@@ -283,14 +322,25 @@ export function guardEarlyHangup(parsed, call) {
 export function detectCallerIntent(userText) {
   const text = String(userText || "").trim();
   const lower = text.toLowerCase();
-  if (!text) return { wrongPerson: false, outOfArea: false, notInterested: false, doNotCall: false };
+  if (!text) return {
+    wrongPerson: false,
+    outOfArea: false,
+    notGraduate: false,
+    notInterested: false,
+    doNotCall: false,
+    callbackRequested: false,
+  };
 
-  const wrongPerson = /wrong (person|number)|गलत (नंबर|व्यक्ति|आदमी)|వేరే (వ్యక్తి|నెంబర్|వాళ్ళు)|not (me|him|her)\b|मेरा नाम नहीं|నేను కాదు|wrong (log|banda)/i.test(text);
+  const wrongPerson = /wrong (person|number)|galat (number|person|aadmi|banda)|गलत (नंबर|व्यक्ति|आदमी)|వేరే (వ్యక్తి|నెంబర్|వాళ్ళు)|not (me|him|her)\b|main ravi nahi (hoon|hun)|मेरा नाम नहीं|मैं रवि नहीं हूँ|मैं वो नहीं हूँ|నేను కాదు|wrong (log|banda)/i.test(text);
+  const notGraduate = /not (a )?graduate|graduate (nahi|nahin|नहीं)|ग्रेजुएट नहीं|graduation नहीं|డిగ్రీ లేదు|graduate కాదు/i.test(text);
   const outsideCity = /\b(chandigarh|mohali|delhi|mumbai|punjab|haryana|bangalore|bengaluru|kolkata|jaipur|pune)\b/i.test(text)
     || /चंडीगढ़|चण्डीगढ़|मोहाली|दिल्ली|मुंबई|पंजाब|हरियाणा/.test(text);
   const declineArea = /not for me|won'?t be for me|mere liye.{0,40}(nahi|nahin|नहीं)|मेरे लिए.{0,40}(नहीं|ना)|नहीं होगा|ye mere liye|यह मेरे लिए|out of (area|state|constituency)|दूसरे (शहर|राज्य)|different (city|state)|इधर का नहीं|उधर (साइड|side)|mere area|hyderabad.{0,24}(nahi|नहीं)|constituency.{0,24}(nahi|नहीं)/i.test(text);
-  const outOfArea = declineArea || (outsideCity && /(nahi|nahin|नहीं|not for|won'?t|नहीं होगा|ka nahi|का नहीं)/i.test(text));
+  const outOfArea = !notGraduate && (
+    declineArea || (outsideCity && /(nahi|nahin|नहीं|not for|won'?t|नहीं होगा|ka nahi|का नहीं)/i.test(text))
+  );
   const doNotCall = /do not call|don't call|dnc|कॉल मत|फोन मत|दोबारा (मत|नहीं)|మళ్లీ call చేయవద్దు/i.test(text);
+  const callbackRequested = !doNotCall && /call (me )?(back )?(tomorrow|later|in the evening|at \d)|(?:kal|baad mein|shaam ko).{0,30}call|कल.{0,30}(कॉल|फोन)|बाद में.{0,30}(कॉल|फोन)|తర్వాత.{0,30}call|రేపు.{0,30}call/i.test(text);
   // User asking the agent to continue / explain is NOT a refusal.
   const wantsContinue = /क्या बात|आगे (बता|बात|क्या)|what (do you|did you|is it)|tell me|बोलना है|बताना चाह|बात करो|आगे करो|kyun call|why (did you|are you) call/i.test(text);
   const softRefuse = /(मन नहीं|दिल नहीं|रुचि नहीं|दिलचस्पी नहीं|बात नहीं करनी|नहीं करना चाह|interested नहीं|not interested|no thanks|not now|వద్దు|అక్కర్లేదు)/i.test(text);
@@ -300,7 +350,14 @@ export function detectCallerIntent(userText) {
     || /(not interested|no thanks|not now)/i.test(lower)
   );
 
-  return { wrongPerson, outOfArea, notInterested: notInterested || outOfArea, doNotCall };
+  return {
+    wrongPerson,
+    outOfArea,
+    notGraduate,
+    notInterested: notInterested || outOfArea || notGraduate,
+    doNotCall,
+    callbackRequested,
+  };
 }
 
 function outOfAreaClosing(language) {
@@ -308,6 +365,13 @@ function outOfAreaClosing(language) {
   if (code === "hi-IN") return "ठीक है, यह आपके क्षेत्र के लिए नहीं है। धन्यवाद।";
   if (code === "en-IN") return "Okay, this isn't for your area. Thank you, goodbye.";
   return "సరే అండి, ఇది మీ area కోసం కాదు.";
+}
+
+function notGraduateClosing(language) {
+  const code = getLanguage(language).code;
+  if (code === "hi-IN") return "समझ गई। यह Graduate MLC registration graduates के लिए है। धन्यवाद।";
+  if (code === "en-IN") return "Understood. This Graduate MLC registration is for graduates. Thank you, goodbye.";
+  return "అర్థమైంది అండి. ఈ Graduate MLC registration graduates కోసం. Thank you.";
 }
 
 /** Force correct ending when the caller clearly declined or is out of area. */
@@ -328,9 +392,23 @@ export function intentDrivenReply(agent, userText) {
       disposition: "do_not_call",
     };
   }
+  if (intent.callbackRequested) {
+    return {
+      text: closingLineFor("callback_requested", lang),
+      endCall: true,
+      disposition: "callback_requested",
+    };
+  }
   if (intent.outOfArea) {
     return {
       text: outOfAreaClosing(lang),
+      endCall: true,
+      disposition: "not_interested",
+    };
+  }
+  if (intent.notGraduate) {
+    return {
+      text: notGraduateClosing(lang),
       endCall: true,
       disposition: "not_interested",
     };
@@ -359,10 +437,24 @@ export function normalizeEndDisposition(parsed, agent, userText) {
       disposition: "wrong_person",
     };
   }
-  if (intent.outOfArea || intent.notInterested || intent.doNotCall) {
-    const disposition = intent.doNotCall ? "do_not_call" : "not_interested";
+  if (
+    intent.outOfArea
+    || intent.notGraduate
+    || intent.notInterested
+    || intent.doNotCall
+    || intent.callbackRequested
+  ) {
+    const disposition = intent.doNotCall
+      ? "do_not_call"
+      : intent.callbackRequested
+        ? "callback_requested"
+        : "not_interested";
     return {
-      text: intent.outOfArea ? outOfAreaClosing(lang) : closingLineFor(disposition, lang),
+      text: intent.outOfArea
+        ? outOfAreaClosing(lang)
+        : intent.notGraduate
+          ? notGraduateClosing(lang)
+          : closingLineFor(disposition, lang),
       endCall: true,
       disposition,
     };
@@ -552,9 +644,73 @@ function cannedVoiceTurn({ agent, history, userText, slots }) {
   const intent = intentDrivenReply(agent, userText);
   if (intent) return intent;
 
-  // Never treat language-switch / clarification as refusal.
-  if (/hindi|english|telugu|हिंदी|हिन्दी|తెలుగు|में बात|लो बात|switch|language|समझ नहीं|samajh/i.test(text)) {
-    return null;
+  // Deterministic language switch: no repeated greeting or awkward transliteration.
+  const requestedLanguage = detectRequestedLanguage(text);
+  if (requestedLanguage === "hi-IN") {
+    return {
+      text: "हाँ, हिंदी में बात कर सकती हूँ। Graduate MLC voter registration के बारे में बस तीस seconds बात करनी थी—क्या अभी समय है?",
+      endCall: false,
+      disposition: null,
+    };
+  }
+  if (requestedLanguage === "en-IN") {
+    return {
+      text: "Sure, I can speak in English. This is about Graduate MLC voter registration—may I take thirty seconds?",
+      endCall: false,
+      disposition: null,
+    };
+  }
+  if (requestedLanguage === "te-IN") {
+    return {
+      text: "అవును, తెలుగులో మాట్లాడతాను. Graduate MLC voter registration గురించి ముప్పై seconds చెప్పొచ్చా?",
+      endCall: false,
+      disposition: null,
+    };
+  }
+
+  const activeLanguage = getLanguage(agent?.language).code;
+  if (/kyun call|kyu call|क्यों (कॉल|फोन)|why (are|did) you call|ఎందుకు call/i.test(text)) {
+    if (activeLanguage === "hi-IN") {
+      return {
+        text: "Graduate MLC voter registration की जानकारी और मदद के लिए कॉल किया है। क्या मैं तीस seconds में बता दूँ?",
+        endCall: false,
+        disposition: null,
+      };
+    }
+    if (activeLanguage === "en-IN") {
+      return {
+        text: "I called to explain Graduate MLC voter registration and offer help. May I take thirty seconds?",
+        endCall: false,
+        disposition: null,
+      };
+    }
+    return {
+      text: "Graduate MLC voter registration గురించి సమాచారం, help ఇవ్వడానికి call చేశాను. ముప్పై seconds చెప్పొచ్చా?",
+      endCall: false,
+      disposition: null,
+    };
+  }
+
+  if (/form\s*18.{0,30}(kya|क्या|what)|(?:kya|क्या|what).{0,30}form\s*18/i.test(text)) {
+    if (activeLanguage === "hi-IN") {
+      return {
+        text: "Form 18, Graduate MLC voter list में registration का form है। क्या इसका official link WhatsApp पर भेज दूँ?",
+        endCall: false,
+        disposition: null,
+      };
+    }
+    if (activeLanguage === "en-IN") {
+      return {
+        text: "Form 18 is used to register on the Graduate MLC voter list. Shall I send the official link on WhatsApp?",
+        endCall: false,
+        disposition: null,
+      };
+    }
+    return {
+      text: "Form 18, Graduate MLC voter listలో registration కోసం. Official link WhatsAppలో పంపమంటారా?",
+      endCall: false,
+      disposition: null,
+    };
   }
 
   // Only first user reply after greeting for short affirmations.

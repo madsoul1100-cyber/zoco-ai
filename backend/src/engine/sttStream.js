@@ -22,9 +22,10 @@ function buildSarvamUrl({ language = "auto", eagerness = 7 } = {}) {
     endpointing: "vad",
     encoding: "linear16",
     sample_rate: "16000",
-    threshold: "0.30",
+    // Reject room noise and distant voices; close-mic speech still clears this.
+    threshold: "0.42",
     silence_duration_ms: String(silenceMsFromEagerness(eagerness)),
-    min_speech_duration_ms: "120",
+    min_speech_duration_ms: "240",
   });
   return `${SARVAM_REALTIME}?${params.toString()}`;
 }

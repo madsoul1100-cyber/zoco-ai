@@ -135,7 +135,7 @@ const callSettings = {
   switchLanguage: true,
   allowedLanguages: ["te-IN", "hi-IN", "en-IN"],
   autoDetectLanguage: true,
-  indicNumbers: true,
+  indicNumbers: false,
   pronunciations,
   sarvamDictId,
   nudgeEnabled: true,

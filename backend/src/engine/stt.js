@@ -13,7 +13,10 @@ export async function transcribeAudio(buffer, { language = "en-IN", mime = "audi
   if (!key || !buffer?.length) return "";
   const form = new FormData();
   form.append("file", new Blob([new Uint8Array(buffer)], { type: mime }), filename);
-  form.append("language_code", sarvamTtsLanguage(language));
+  const languageCode = ["auto", "unknown"].includes(String(language).toLowerCase())
+    ? "unknown"
+    : sarvamTtsLanguage(language);
+  form.append("language_code", languageCode);
   form.append("model", "saarika:v2.5");
   const response = await fetch("https://api.sarvam.ai/speech-to-text", {
     method: "POST",
