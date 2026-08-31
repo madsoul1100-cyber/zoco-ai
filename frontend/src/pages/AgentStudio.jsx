@@ -1185,8 +1185,9 @@ export default function AgentStudio() {
   }
 
   function sttLanguage() {
-    const locked = callRef.current?.languageLocked || callRef.current?.language;
-    // After a language lock, force STT so Hindi comes back in Devanagari (not Telugu phonetics).
+    // Only force STT after an explicit/content lock. Using call.language (agent default
+    // te-IN) here made Hindi speech come back as Telugu gibberish and blocked switching.
+    const locked = callRef.current?.languageLocked;
     if (locked === "hi-IN" || locked === "en-IN" || locked === "te-IN") return locked;
     const settings = callSettings(agentRef.current);
     if (settings.autoDetectLanguage !== false || settings.switchLanguage !== false) return "auto";

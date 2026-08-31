@@ -3,7 +3,14 @@
  * Fast path: short spoken text + optional [END:disposition] tag. No JSON-mode round trip.
  */
 
-import { detectLanguageFromText, detectRequestedLanguage, getLanguage, looksLikeEnglish } from "../languages.js";
+import {
+  detectLanguageFromText,
+  detectRequestedLanguage,
+  getLanguage,
+  looksLikeEnglish,
+  looksLikeSttGarble,
+  shouldLockSpokenLanguage,
+} from "../languages.js";
 import { getAiSettings } from "../store.js";
 import { fallbackLlmConfig, llmHeaders, resolveLlmConfig, speakerGender } from "./providers.js";
 import { openAiTools, runToolCall } from "./tools.js";
@@ -519,6 +526,7 @@ export function followCustomerLanguage(call, agent, userText) {
     ? call._sttLanguageHint
     : "";
   if (call) delete call._sttLanguageHint;
+  const garbled = looksLikeSttGarble(userText);
 
   if (requested && call) {
     call.language = requested;
@@ -548,7 +556,11 @@ export function followCustomerLanguage(call, agent, userText) {
     if (hasDevanagari) detected = "hi-IN";
     else if (english && !hasTelugu) detected = "en-IN";
     else if (fromText === "hi-IN" || fromText === "en-IN") detected = fromText;
+    // Garbled Telugu from a te-biased STT is not proof the caller spoke Telugu.
+    else if (garbled && (sttHint === "te-IN" || hasTelugu)) detected = locked || current;
     else detected = sttHint;
+  } else if (garbled && detected === "te-IN" && current !== "te-IN") {
+    detected = locked || current;
   }
 
   // STT often writes Hindi speech in Telugu script — do not drop back to Telugu after a Hindi lock.
@@ -564,9 +576,18 @@ export function followCustomerLanguage(call, agent, userText) {
   if (!requested && !locked && Array.isArray(allowed) && allowed.length && !allowed.includes(detected)) {
     next = current;
   }
+
+  // Lock when the caller is clearly speaking Hindi/English — no need for "hindi mein baat kariye".
+  const contentLock = !locked
+    && !requested
+    && shouldLockSpokenLanguage(userText, next)
+    && (next === "hi-IN" || next === "en-IN")
+    && next !== (agent?.language || current);
+
   if (call) {
     call.language = next;
     if (locked) call.languageLocked = locked;
+    else if (contentLock) call.languageLocked = next;
   }
   return next;
 }

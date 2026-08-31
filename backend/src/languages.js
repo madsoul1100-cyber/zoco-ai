@@ -168,7 +168,44 @@ const SCRIPT_LANGS = [
 ];
 
 const HINGLISH =
-  /\b(haan|hanji|nahi|nahin|mat|kya|hai|hain|aap|namaste|namaskar|theek|thik|achha|accha|bilkul|yaar|bhai|ji|kaise|hoon|rha|raha|karo|bolo|suno|samajh|matlab|kitna|kab|kahan)\b/i;
+  /\b(haan|hanji|haa[n]?|nahi|nahin|mat|kya|hai|hain|aap|aapka|aapke|main|mein|mujhe|mera|meri|namaste|namaskar|theek|thik|achha|accha|bilkul|yaar|bhai|ji|kaise|kaisa|hoon|hun|rha|raha|rahi|karo|karna|bolo|bolna|suno|samajh|matlab|kitna|kab|kahan|kyun|kyunki|batao|bataiye|sunao|baat|karo|kariye|chahiye|sakte|sakta|sakti)\b/i;
+
+/** Telugu STT often emits long repeated syllables when the caller spoke Hindi/English. */
+export function looksLikeSttGarble(text) {
+  const raw = String(text || "").replace(/\s+/g, "");
+  if (raw.length < 24) return false;
+  const unique = new Set([...raw]).size;
+  if (unique <= 4 && raw.length >= 24) return true;
+  if (unique <= 8 && raw.length >= 48 && unique / raw.length < 0.12) return true;
+  // Same 2–4 char chunk repeated many times (లోలోలో / హాహాహా).
+  const chunk = raw.slice(0, Math.min(4, Math.floor(raw.length / 8)));
+  if (chunk.length >= 2) {
+    const repeats = raw.split(chunk).length - 1;
+    if (repeats >= 8 && repeats * chunk.length / raw.length > 0.55) return true;
+  }
+  return false;
+}
+
+/** Enough signal to lock the call language from content (not a lone "yes"/"Form 18"). */
+export function shouldLockSpokenLanguage(text, code) {
+  const raw = String(text || "").trim();
+  if (!raw || !code) return false;
+  if (looksLikeSttGarble(raw)) return false;
+  if (code === "hi-IN") {
+    if (/[\u0900-\u097F]/.test(raw) && raw.replace(/[^\u0900-\u097F]/g, "").length >= 6) return true;
+    const hits = (raw.match(new RegExp(HINGLISH.source, "gi")) || []).length;
+    if (hits >= 2 && raw.length >= 10) return true;
+    if (hits >= 1 && raw.length >= 22 && !looksLikeEnglish(raw)) return true;
+    return false;
+  }
+  if (code === "en-IN") {
+    return looksLikeEnglish(raw) && (raw.match(/[A-Za-z]+/g) || []).length >= 4;
+  }
+  if (code === "te-IN") {
+    return /[\u0C00-\u0C7F]/.test(raw) && !looksLikeSttGarble(raw) && raw.length >= 8;
+  }
+  return false;
+}
 
 const HINDI_REQUEST =
   /\b(?:talk|speak|switch|reply|answer|please|want|can|you|in).{0,48}\bhindi\b|\bin hindi\b|\bhindi please\b|\bhindi mein\b|\bhindi me\b|\bhindi\b.{0,24}(?:baat|mein|me|bolo|karo|kariye|please)|(?:baat|bolo|karo).{0,16}\bhindi\b|(?:hindi|हिंदी|हिन्दी|హిందీ|హింది).{0,24}(?:baat|बात|mein|me|में|bolo|बोल|karo|kariye|कर|करो|please|ప్లీజ్)|(?:baat|बात|ప్లీజ్).{0,16}(?:hindi|हिंदी|హిందీ)|हिंदी में|हिन्दी में|हिंदी बोल|హిందీలో|(?:hindi\s+){2,}/i;
@@ -258,9 +295,15 @@ export function detectLanguageFromText(text, fallback = DEFAULT_LANGUAGE) {
   const requested = detectRequestedLanguage(raw);
   if (requested) return requested;
 
+  // Wrong-language STT garble (Hindi heard as repeated Telugu) — do not trust script.
+  if (looksLikeSttGarble(raw)) return current;
+
   // Use normalized text so Telugu-script "ప్లీజ్ హిందీ" is not forced to te-IN.
   for (const { re, code } of SCRIPT_LANGS) {
-    if (re.test(raw)) return code;
+    if (re.test(raw)) {
+      if (code === "te-IN" && looksLikeSttGarble(raw)) continue;
+      return code;
+    }
   }
 
   if (HINGLISH.test(raw) && !looksLikeEnglish(raw)) return "hi-IN";

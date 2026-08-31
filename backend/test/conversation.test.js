@@ -226,3 +226,45 @@ test("Telugu-script Hindi please is treated as Hindi request", () => {
   assert.equal(language, "hi-IN");
   assert.equal(call.languageLocked, "hi-IN");
 });
+
+test("natural Roman Hindi speech locks Hindi without an explicit switch phrase", () => {
+  const call = { language: "te-IN" };
+  const language = followCustomerLanguage(
+    call,
+    agent,
+    "haan main graduate hoon, mujhe form eighteen ke baare mein batao"
+  );
+  assert.equal(language, "hi-IN");
+  assert.equal(call.languageLocked, "hi-IN");
+});
+
+test("Devanagari Hindi content locks Hindi without saying hindi mein baat kariye", () => {
+  const call = { language: "te-IN" };
+  const language = followCustomerLanguage(
+    call,
+    agent,
+    "हाँ मैं सुन रहा हूँ, आगे बताइए"
+  );
+  assert.equal(language, "hi-IN");
+  assert.equal(call.languageLocked, "hi-IN");
+});
+
+test("repetitive Telugu STT garble does not force a Telugu lock", () => {
+  const call = {
+    language: "te-IN",
+    _sttLanguageHint: "te-IN",
+  };
+  const garble = "లోలోలోలోలోలోలోలోలోలోలోలోలోలోలోలోలోలోలోలోలోలోలోలో";
+  const language = followCustomerLanguage(call, agent, garble);
+  assert.equal(language, "te-IN");
+  assert.equal(call.languageLocked, undefined);
+});
+
+test("lone yes or Form 18 does not lock English", () => {
+  const call = { language: "te-IN" };
+  followCustomerLanguage(call, agent, "yes");
+  assert.equal(call.languageLocked, undefined);
+  const call2 = { language: "te-IN" };
+  followCustomerLanguage(call2, agent, "Form 18");
+  assert.equal(call2.languageLocked, undefined);
+});
