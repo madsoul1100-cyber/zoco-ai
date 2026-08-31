@@ -10,7 +10,11 @@
     "dev": "concurrently -n api,web -c cyan,magenta \"npm run dev --prefix backend\" \"npm run dev --prefix frontend\"",
     "dev:worker": "npm run dev --prefix realtime",
     "dev:all": "concurrently -n api,web,worker -c cyan,magenta,green \"npm run dev --prefix backend\" \"npm run dev --prefix frontend\" \"npm run dev --prefix realtime\"",
-    "start": "npm run start --prefix backend"
+    "start": "npm run start --prefix backend",
+    "clean:disk": "bash scripts/clean-disk.sh",
+    "pm2:start": "npm run build --prefix frontend && pm2 startOrReload ecosystem.config.cjs --update-env && pm2 save",
+    "pm2:stop": "pm2 stop zoco-api zoco-web",
+    "pm2:logs": "pm2 logs zoco-api zoco-web"
   },
   "devDependencies": {
     "concurrently": "^9.1.2"
