@@ -7,7 +7,8 @@
     "dev": "node --watch-path=src src/server.js",
     "start": "node src/server.js",
     "seed": "node src/seed.js",
-    "seed:priya": "node scripts/seedPriyaMlc.js"
+    "seed:priya": "node scripts/seedPriyaMlc.js",
+    "test": "node --test test/*.test.js"
   },
   "dependencies": {
     "@aws-sdk/client-s3": "^3.864.0",
@@ -15,6 +16,7 @@
     "cors": "^2.8.5",
     "express": "^5.1.0",
     "ioredis": "^5.7.0",
+    "livekit-server-sdk": "^2.18.0",
     "mongodb": "^6.18.0",
     "multer": "^2.0.1",
     "uuid": "^11.1.0",

@@ -3,7 +3,8 @@ import { recordTurn } from "../infra/events.js";
 import { enqueueDial, enqueueRecall, queueState } from "../infra/queue.js";
 import { countLiveCampaignCalls, getCall, getCallAgent, getCampaign, saveCall } from "../store.js";
 import { inCallingWindow, msUntilWindow } from "../engine/window.js";
-import { placeTwilioCall, resolveTelephony } from "../telephony/twilio.js";
+import { dispatchLiveKitOutboundCall, isPilotAgent, livekitReady } from "./livekit.js";
+import { placeExotelCall, resolveTelephony } from "../telephony/index.js";
 
 export async function attachTurn(call, message, source) {
   const tagged = { ...message, source: source || inferSource(call) };
@@ -32,33 +33,76 @@ export async function scheduleFollowUp(call) {
   }
 }
 
-export async function dialLiveCall(call) {
+async function dialExotelCall(call, agent) {
   const tel = await resolveTelephony();
-  if (!tel.twilioReady) {
-    const missing = [
-      !tel.accountSid && "Twilio Account SID",
-      !tel.authToken && "Twilio Auth Token",
-      !tel.fromNumber && "Twilio From number",
-      !tel.publicBaseUrl && "public webhook URL (start ngrok on port 8787)",
-    ].filter(Boolean);
-    throw new Error(`Live phone calling is not ready. Add: ${missing.join(", ")}`);
-  }
-  const agent = await getCallAgent(call);
-  const detectVoicemail = Boolean(agent?.callSettings?.voicemailEnabled);
-  const result = await placeTwilioCall({ call, tel, detectVoicemail });
+  const result = await placeExotelCall({ call, tel });
   call.channel = "telephony";
-  call.twilioSid = result.sid;
+  call.runtime = "exotel";
+  call.exotelSid = result.sid;
   call.status = "ringing";
   call.nudgeIndex = 0;
   if (!call.startedAt) call.startedAt = new Date().toISOString();
   await attachTurn(call, {
     id: `msg_${uuid().slice(0, 8)}`,
     role: "system",
-    text: `Live call: ${tel.fromNumber} → ${call.customer?.phone} (${result.sid})`,
+    text: `Exotel call: ${tel.fromNumber} → ${call.customer?.phone} (${result.sid || "queued"})`,
     timestamp: new Date().toISOString(),
     audioOffsetMs: null,
-  }, "telephony");
+  }, "exotel");
   return saveCall(call);
+}
+
+async function dialLiveKitPilotCall(call, agent) {
+  const tel = await resolveTelephony();
+  const result = await dispatchLiveKitOutboundCall(call, agent);
+  call.channel = "telephony";
+  call.runtime = result.runtime;
+  call.livekit = {
+    roomName: result.roomName,
+    participantId: result.participantId,
+    sipCallId: result.sipCallId,
+  };
+  call.status = "ringing";
+  call.nudgeIndex = 0;
+  if (!call.startedAt) call.startedAt = new Date().toISOString();
+  await attachTurn(call, {
+    id: `msg_${uuid().slice(0, 8)}`,
+    role: "system",
+    text: `LiveKit pilot: ${tel.fromNumber} → ${call.customer?.phone} (${result.roomName})`,
+    timestamp: new Date().toISOString(),
+    audioOffsetMs: null,
+  }, "livekit");
+  return saveCall(call);
+}
+
+export async function dialLiveCall(call) {
+  const tel = await resolveTelephony();
+  if (!tel.exotelReady) {
+    const missing = [
+      !tel.accountSid && "Exotel Account SID",
+      !tel.apiKey && "Exotel API key",
+      !tel.apiToken && "Exotel API token",
+      !tel.fromNumber && "Exotel Exophone",
+      !tel.publicBaseUrl && "public webhook URL (HTTPS, e.g. ngrok on 8787)",
+    ].filter(Boolean);
+    throw new Error(`Live phone calling is not ready. Add: ${missing.join(", ")}`);
+  }
+  const agent = await getCallAgent(call);
+  if (isPilotAgent(agent?.id) && livekitReady()) {
+    try {
+      return await dialLiveKitPilotCall(call, agent);
+    } catch (error) {
+      console.warn("LiveKit pilot dispatch failed, falling back to Exotel:", error.message);
+      await attachTurn(call, {
+        id: `msg_${uuid().slice(0, 8)}`,
+        role: "system",
+        text: `LiveKit pilot unavailable (${error.message}). Falling back to Exotel.`,
+        timestamp: new Date().toISOString(),
+        audioOffsetMs: null,
+      }, "system");
+    }
+  }
+  return dialExotelCall(call, agent);
 }
 
 export async function queueOrDial(call) {
@@ -99,6 +143,9 @@ export async function performRecall(previousId) {
     recordingUrl: null,
     recordingKey: null,
     twilioSid: null,
+    exotelSid: null,
+    livekit: null,
+    runtime: null,
     parentCallId: previous.id,
     createdAt: now,
     messages: [],
@@ -119,7 +166,7 @@ export async function performRecall(previousId) {
   }, "telephony");
   let saved = await saveCall(next);
   const tel = await resolveTelephony();
-  if (tel.twilioReady) saved = await queueOrDial(saved);
+  if (tel.exotelReady) saved = await queueOrDial(saved);
   return saved;
 }
 
@@ -130,7 +177,7 @@ export async function handleCallJob(job) {
     if (["completed", "busy", "no_answer", "failed", "dropped"].includes(call.status) && !call.recall?.needed) {
       return;
     }
-    if (call.twilioSid) return;
+    if (call.twilioSid || call.livekit?.roomName || call.exotelSid) return;
     if (call.campaignId) {
       const campaign = await getCampaign(call.campaignId);
       if (!campaign || campaign.status === "paused") return;

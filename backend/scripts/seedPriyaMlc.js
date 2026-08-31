@@ -123,12 +123,12 @@ const kb = await saveKnowledgeBase({
 });
 
 const callSettings = {
-  speakingSpeed: 0.95,
+  speakingSpeed: 1.02,
   pitch: 0,
-  ttsTemperature: 0.42,
+  ttsTemperature: 0.58,
   temperature: 0.45,
   allowInterrupt: true,
-  eagerness: 8,
+  eagerness: 9,
   volumeThresholdDb: -48,
   backgroundSound: "quiet_office",
   backgroundVolume: 0.12,

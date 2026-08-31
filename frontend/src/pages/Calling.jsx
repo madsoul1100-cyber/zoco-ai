@@ -16,9 +16,10 @@ export default function Calling() {
   const [phoneForm, setPhoneForm] = useState({ workspaceName: "", workspacePhone: "" });
   const [contactForm, setContactForm] = useState({ name: "", phone: "", notes: "" });
   const [liveCall, setLiveCall] = useState(null);
-  const [twilioForm, setTwilioForm] = useState({
+  const [exotelForm, setExotelForm] = useState({
     accountSid: "",
-    authToken: "",
+    apiKey: "",
+    apiToken: "",
     fromNumber: "",
     publicBaseUrl: "",
   });
@@ -45,9 +46,10 @@ export default function Calling() {
       workspaceName: tel.workspaceName || "",
       workspacePhone: tel.workspacePhone || "",
     });
-    setTwilioForm({
+    setExotelForm({
       accountSid: tel.accountSid || "",
-      authToken: tel.authTokenSet ? "••••••••" : "",
+      apiKey: tel.apiKeySet ? "••••••••" : "",
+      apiToken: tel.apiTokenSet || tel.authTokenSet ? "••••••••" : "",
       fromNumber: tel.fromNumber || "",
       publicBaseUrl: tel.publicBaseUrl || "",
     });
@@ -99,23 +101,24 @@ export default function Calling() {
     }
   }
 
-  async function saveTwilio(event) {
+  async function saveExotel(event) {
     event.preventDefault();
     setError("");
     try {
       const saved = await api.saveTelephony({
         workspaceName: phoneForm.workspaceName,
         workspacePhone: phoneForm.workspacePhone,
-        accountSid: twilioForm.accountSid.trim(),
-        authToken: twilioForm.authToken.includes("•") ? undefined : twilioForm.authToken.trim(),
-        fromNumber: twilioForm.fromNumber.trim(),
-        publicBaseUrl: twilioForm.publicBaseUrl.trim(),
+        accountSid: exotelForm.accountSid.trim(),
+        apiKey: exotelForm.apiKey.includes("•") ? undefined : exotelForm.apiKey.trim(),
+        apiToken: exotelForm.apiToken.includes("•") ? undefined : exotelForm.apiToken.trim(),
+        fromNumber: exotelForm.fromNumber.trim(),
+        publicBaseUrl: exotelForm.publicBaseUrl.trim(),
       });
       setTelephony(saved);
       setNotice(
-        saved.twilioReady
-          ? "Live calling is ready. Call phone will ring the mobile."
-          : "Saved. Add SID, auth token, From number, and a public URL to go live."
+        saved.exotelReady
+          ? "Exotel is ready. Call phone will ring the customer mobile."
+          : "Saved. Add account SID, API key, token, Exophone, and a public HTTPS URL."
       );
       await refresh();
     } catch (err) {
@@ -158,7 +161,7 @@ export default function Calling() {
         await refresh();
         return;
       }
-      if (call.channel === "telephony" || call.twilioSid) {
+      if (call.channel === "telephony" || call.exotelSid || call.twilioSid) {
         setLiveCall(call);
         setNotice(`Ringing ${call.customer?.phone}. Answer the phone — the agent is on the line.`);
         return;
@@ -173,7 +176,7 @@ export default function Calling() {
     try {
       if (recall) {
         const next = await api.recall(call.id);
-        if (next.channel === "telephony" || next.twilioSid) {
+        if (next.channel === "telephony" || next.exotelSid || next.twilioSid) {
           setLiveCall(next);
           return;
         }
@@ -181,7 +184,7 @@ export default function Calling() {
         return;
       }
       const started = await api.startOutbound(call.id);
-      if (started.channel === "telephony" || started.twilioSid) {
+      if (started.channel === "telephony" || started.exotelSid || started.twilioSid) {
         setLiveCall(started);
         return;
       }
@@ -193,12 +196,14 @@ export default function Calling() {
 
   if (!telephony) return <p className="muted">Loading calling desk…</p>;
 
+  const exotelReady = Boolean(telephony.exotelReady ?? telephony.twilioReady);
+
   return (
     <>
       <PageHeader
         title="Calling desk"
-        subtitle="Connect Twilio, then Call phone. Your mobile will ring and the Zoco agent talks on the line."
-        actions={<span className={`badge ${telephony.twilioReady ? "done" : "recall"}`}>{telephony.twilioReady ? "Live line ready" : "Twilio not connected"}</span>}
+        subtitle="Connect Exotel, then Call phone. The customer mobile rings and the Zoco agent talks on the line."
+        actions={<span className={`badge ${exotelReady ? "done" : "recall"}`}>{exotelReady ? "Live line ready" : "Exotel not connected"}</span>}
       />
 
       {error ? <p className="error">{error}</p> : null}
@@ -206,8 +211,8 @@ export default function Calling() {
 
       <ol className="steps">
         <li><b>Register</b> the mobile that should ring (your phone for a test).</li>
-        <li><b>Connect Twilio</b> — Account SID, Auth Token, a From number, and a public URL (ngrok).</li>
-        <li>On a Twilio trial, <b>verify that mobile</b> at Twilio Verified Caller IDs, then <b>Call phone</b>.</li>
+        <li><b>Connect Exotel</b> — Account SID, API key, token, Exophone, and a public HTTPS URL.</li>
+        <li><b>Call phone</b> — Exotel connects the customer and streams audio to Zoco.</li>
       </ol>
 
       {liveCall ? (
@@ -241,26 +246,30 @@ export default function Calling() {
           ) : null}
         </form>
 
-        <form className="card grid" onSubmit={saveTwilio}>
-          <h3>Twilio live line</h3>
-          <p className="muted">From console.twilio.com. Public URL is filled from ngrok if a tunnel is running on port 8787.</p>
+        <form className="card grid" onSubmit={saveExotel}>
+          <h3>Exotel live line</h3>
+          <p className="muted">From my.exotel.com. Public URL must be HTTPS (your domain or ngrok on port 8787).</p>
           <label>
             Account SID
-            <input className="input" value={twilioForm.accountSid} onChange={(e) => setTwilioForm({ ...twilioForm, accountSid: e.target.value })} placeholder="ACxxxxxxxx" />
+            <input className="input" value={exotelForm.accountSid} onChange={(e) => setExotelForm({ ...exotelForm, accountSid: e.target.value })} placeholder="your-account-sid" />
           </label>
           <label>
-            Auth Token
-            <input className="input" type="password" value={twilioForm.authToken} onChange={(e) => setTwilioForm({ ...twilioForm, authToken: e.target.value })} placeholder="Auth token" />
+            API key
+            <input className="input" value={exotelForm.apiKey} onChange={(e) => setExotelForm({ ...exotelForm, apiKey: e.target.value })} placeholder="API key" />
           </label>
           <label>
-            From number
-            <input className="input" value={twilioForm.fromNumber} onChange={(e) => setTwilioForm({ ...twilioForm, fromNumber: e.target.value })} placeholder="+1…" />
+            API token
+            <input className="input" type="password" value={exotelForm.apiToken} onChange={(e) => setExotelForm({ ...exotelForm, apiToken: e.target.value })} placeholder="API token" />
+          </label>
+          <label>
+            Exophone
+            <input className="input" value={exotelForm.fromNumber} onChange={(e) => setExotelForm({ ...exotelForm, fromNumber: e.target.value })} placeholder="080… or +91…" />
           </label>
           <label>
             Public URL
-            <input className="input" value={twilioForm.publicBaseUrl} onChange={(e) => setTwilioForm({ ...twilioForm, publicBaseUrl: e.target.value })} placeholder="https://xxxx.ngrok-free.app" />
+            <input className="input" value={exotelForm.publicBaseUrl} onChange={(e) => setExotelForm({ ...exotelForm, publicBaseUrl: e.target.value })} placeholder="https://voice.my-leader.in" />
           </label>
-          <button className="btn secondary" type="submit">Save Twilio</button>
+          <button className="btn secondary" type="submit">Save Exotel</button>
         </form>
 
         <form className="card grid" onSubmit={addContact}>
@@ -355,8 +364,8 @@ export default function Calling() {
           <button className="btn ghost" type="button" onClick={() => placeCall({ schedule: false, mode: "browser" })}>Test in browser</button>
           <button className="btn secondary" type="submit">Schedule</button>
         </div>
-        {!telephony.twilioReady ? (
-          <p className="muted">Call phone needs Twilio + ngrok. Test in browser still works without it.</p>
+        {!exotelReady ? (
+          <p className="muted">Call phone needs Exotel + a public HTTPS URL. Test in browser still works without it.</p>
         ) : null}
       </form>
 

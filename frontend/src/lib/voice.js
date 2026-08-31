@@ -9,6 +9,34 @@ const PREFERRED_VOICES = [
   "Victoria",
 ];
 
+/** Explicit language-switch ask — never match the agent's own Telugu greeting. */
+export function isLanguageSwitchCommand(text) {
+  const raw = String(text || "")
+    .trim()
+    .replace(/ప్లీజ్|ప్లీస్/gi, "please")
+    .replace(/హలో|హెలో/gi, "hello")
+    .replace(/కెన్|కాన్/gi, "can")
+    .replace(/యూ|యు/gi, "you")
+    .replace(/టాక్|టాకు/gi, "talk")
+    .replace(/ఇన్/gi, "in")
+    .replace(/హిందీ|హింది/gi, "hindi")
+    .replace(/ఇంగ్లీష్|ఇంగ్లిష్|ఇంగ్లీషు/gi, "english")
+    .replace(/బాత్|బాతు/gi, "baat")
+    .replace(/కరో|కరియే/gi, "karo")
+    .replace(/మాట్లాడండి|మాట్లాడు|మాట్లాడ/gi, "baat")
+    .replace(/\bమే\b|లో\b/gi, "mein");
+  if (!raw) return false;
+  if (/\bhindi\b/i.test(raw) && /\b(talk|speak|in|mein|me|baat|can|you|please|hello|karo|bolo)\b/i.test(raw)) {
+    return true;
+  }
+  if (/हिंदी|हिन्दी/.test(raw) && /(में|बात|बोल|कर)/.test(raw)) return true;
+  if (/\benglish\b/i.test(raw) && /\b(talk|speak|in|mein|me|can|you|please|hello)\b/i.test(raw)) {
+    return true;
+  }
+  if (/\btelugu\b.*\b(lo|mein|me|please|baat|speak|talk)\b|\bin telugu\b|తెలుగులో/i.test(raw)) return true;
+  return false;
+}
+
 export function isMeaningfulBargeIn(text) {
   const normalized = String(text || "")
     .toLowerCase()
@@ -17,8 +45,21 @@ export function isMeaningfulBargeIn(text) {
   if (!normalized) return false;
   const strongCommand = /^(stop|please stop|no|nope|wait|hold on|रुको|रुकिए|बस|नहीं|मत बोलो|ఆపు|వద్దు|చాలు)$/iu;
   if (strongCommand.test(normalized)) return true;
+  if (isLanguageSwitchCommand(normalized)) return true;
+  if (/please stop|stop talking|not interested|don't call|do not call|मेरी बात|बात पूरी|रुक|सुनो|wait a minute|let me finish|hold on/i.test(normalized)) return true;
   const words = normalized.match(/[\p{L}\p{M}\p{N}'’]+/gu) || [];
-  return words.length >= 2 && normalized.length >= 5;
+  // Require a real phrase — short fragments of agent echo must not barge in.
+  return words.length >= 3 && normalized.length >= 8;
+}
+
+/** Stop / language-switch only — do NOT match generic Telugu "మాట్లాడ" from the agent's greeting. */
+export function isUrgentUserCommand(text) {
+  const raw = String(text || "").trim();
+  if (!raw) return false;
+  if (isLanguageSwitchCommand(raw)) return true;
+  if (/^(stop|please stop|wait|hold on|रुको|रुकिए|बस|मत बोलो|ఆపు|వద్దు|చాలు)\b/iu.test(raw)) return true;
+  if (/please stop|stop talking|not interested/i.test(raw)) return true;
+  return false;
 }
 
 export function stripModelControlText(text) {
@@ -39,7 +80,33 @@ export function normalizeVoiceTranscript(text) {
   ) {
     return "Hindi mein baat karo";
   }
-  return raw;
+  let next = raw
+    .replace(/ప్లీజ్|ప్లీస్/gi, "please")
+    .replace(/హలో|హెలో/gi, "hello")
+    .replace(/కెన్|కాన్/gi, "can")
+    .replace(/యూ|యు/gi, "you")
+    .replace(/టాక్|టాకు/gi, "talk")
+    .replace(/ఇన్/gi, "in")
+    .replace(/హిందీ|హింది/gi, "hindi")
+    .replace(/ఇంగ్లీష్|ఇంగ్లిష్|ఇంగ్లీషు/gi, "english")
+    .replace(/బాత్|బాతు/gi, "baat")
+    .replace(/కరో|కరియే/gi, "karo")
+    .replace(/మాట్లాడండి|మాట్లాడు/gi, "baat kariye")
+    .replace(/\bమే\b|లో\b/gi, "mein")
+    // Common Hindi STT corruptions
+    .replace(/\bVomitin\b|\bvomitin\b|\bform\s*eat(een|en)\b|\bform\s*aitin\b/gi, "Form 18")
+    .replace(/फॉर्म\s*एटीन|फॉर्म\s*एटिन|वोमिटिन/gi, "Form 18")
+    .replace(/महाली|मोहाली|मोहली/gi, "मोहाली")
+    .replace(/\bmohali\b/gi, "मोहाली")
+    .replace(/\s+/g, " ")
+    .trim();
+  if (/\bhindi\b/i.test(next) && /\b(talk|speak|in|mein|me|baat|can|you|please|hello|karo)\b/i.test(next)) {
+    return "Hindi mein baat kariye";
+  }
+  if (/\benglish\b/i.test(next) && /\b(talk|speak|in|mein|me|can|you|please|hello)\b/i.test(next)) {
+    return "Please talk in English";
+  }
+  return next;
 }
 
 export function loadVoices() {
@@ -532,9 +599,28 @@ function compactSpeech(text) {
     .replace(/\s+/g, "");
 }
 
+/** True when STT is hearing the agent's own TTS (speaker → mic echo). */
+export function isLikelyAgentEcho(heard, lastSpoken = "") {
+  const heardBits = compactSpeech(heard);
+  const spokenBits = compactSpeech(lastSpoken);
+  if (!heardBits || !spokenBits) return false;
+  if (spokenBits.includes(heardBits)) return true;
+  if (heardBits.length >= 6 && spokenBits.includes(heardBits.slice(0, Math.min(heardBits.length, 18)))) return true;
+  if (heardBits.length >= 8 && heardBits.includes(spokenBits.slice(0, Math.min(24, spokenBits.length)))) return true;
+  const heardWords = String(heard || "").trim().split(/\s+/).filter(Boolean);
+  const spokenWords = String(lastSpoken || "").trim().split(/\s+/).filter(Boolean);
+  if (!heardWords.length || !spokenWords.length) return false;
+  const spokenSet = new Set(spokenWords.map((w) => compactSpeech(w)).filter(Boolean));
+  const overlap = heardWords.filter((w) => spokenSet.has(compactSpeech(w))).length;
+  if (heardWords.length <= 4 && overlap >= Math.ceil(heardWords.length * 0.6)) return true;
+  if (heardWords.length >= 3 && overlap / heardWords.length >= 0.55) return true;
+  return false;
+}
+
 export function isNoiseTranscript(heard, lastSpoken = "") {
   const raw = String(heard || "").trim();
   if (!raw) return true;
+  if (isLikelyAgentEcho(raw, lastSpoken)) return true;
   if (/^(?:m+|h+m+|u+h+|u+m+)[\s.,!?-]*$/i.test(raw) || /^(?:హ్మ్|అం|हम्म|उम्)[\s.,!?-]*$/u.test(raw)) {
     return true;
   }

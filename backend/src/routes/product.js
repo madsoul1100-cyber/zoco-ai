@@ -42,7 +42,7 @@ import {
   saveInboundDeployment,
   saveKnowledgeBase,
 } from "../store.js";
-import { inboundLineStatus, publicTelephony, resolveTelephony, syncInboundWebhook } from "../telephony/twilio.js";
+import { inboundLineStatus, publicTelephony, resolveTelephony, syncInboundWebhook } from "../telephony/index.js";
 import { documentBytes, fileKind, knowledgeStats, retrieveFromKnowledge } from "../engine/knowledge.js";
 
 function textFromUpload(file) {
@@ -190,7 +190,7 @@ export function mountProductRoutes(app, { upload } = {}) {
 
   async function decorateInbound(item, tel, line) {
     const shaped = ensureInboundShape(item, tel);
-    const live = Boolean(shaped.status === "live" && shaped.agentId && tel.twilioReady && line.wired);
+    const live = Boolean(shaped.status === "live" && shaped.agentId && tel.exotelReady && line.wired);
     return {
       ...shaped,
       scheduleLabel: formatSchedule(shaped.schedule),
@@ -225,7 +225,7 @@ export function mountProductRoutes(app, { upload } = {}) {
   async function wireInbound(enabled) {
     const tel = await resolveTelephony();
     let line = await inboundLineStatus(tel);
-    if (tel.twilioReady) {
+    if (tel.exotelReady) {
       try {
         const synced = await syncInboundWebhook(tel);
         line = await inboundLineStatus(tel);
@@ -236,7 +236,7 @@ export function mountProductRoutes(app, { upload } = {}) {
       }
     }
     if (enabled && !line.wired) {
-      throw new Error(line.error || "Could not point this Twilio number at the inbound webhook.");
+      throw new Error(line.error || "Connect Exotel and configure inbound in the Exotel dashboard.");
     }
     return { tel, line };
   }
@@ -245,7 +245,7 @@ export function mountProductRoutes(app, { upload } = {}) {
     const inbound = await getInbound();
     const tel = await resolveTelephony();
     const line = await inboundLineStatus(tel);
-    const live = Boolean(inbound.enabled && inbound.agentId && tel.twilioReady && line.wired);
+    const live = Boolean(inbound.enabled && inbound.agentId && tel.exotelReady && line.wired);
     res.json({
       ...inbound,
       phoneNumber: inbound.phoneNumber || tel.fromNumber || "",
@@ -275,7 +275,7 @@ export function mountProductRoutes(app, { upload } = {}) {
         agentId,
         phoneNumber: normalizePhone(req.body?.phoneNumber || current.phoneNumber || tel.fromNumber),
       });
-      const live = Boolean(saved.enabled && saved.agentId && tel.twilioReady && line.wired);
+      const live = Boolean(saved.enabled && saved.agentId && tel.exotelReady && line.wired);
       res.json({ ...saved, telephony: publicTelephony(tel), line, live });
     } catch (error) {
       res.status(400).json({ error: error.message });
@@ -557,7 +557,7 @@ export function mountProductRoutes(app, { upload } = {}) {
       };
       await saveCall(call);
       already.add(normalizePhone(row.phone));
-      if (!tel.twilioReady) {
+      if (!tel.exotelReady) {
         created.push(call);
         continue;
       }

@@ -170,11 +170,17 @@ const SCRIPT_LANGS = [
 const HINGLISH =
   /\b(haan|hanji|nahi|nahin|mat|kya|hai|hain|aap|namaste|namaskar|theek|thik|achha|accha|bilkul|yaar|bhai|ji|kaise|hoon|rha|raha|karo|bolo|suno|samajh|matlab|kitna|kab|kahan)\b/i;
 
+const HINDI_REQUEST =
+  /\b(?:talk|speak|switch|reply|answer|please|want|can|you|in).{0,48}\bhindi\b|\bin hindi\b|\bhindi please\b|\bhindi mein\b|\bhindi me\b|\bhindi\b.{0,24}(?:baat|mein|me|bolo|karo|kariye|please)|(?:baat|bolo|karo).{0,16}\bhindi\b|(?:hindi|हिंदी|हिन्दी|హిందీ|హింది).{0,24}(?:baat|बात|mein|me|में|bolo|बोल|karo|kariye|कर|करो|please|ప్లీజ్)|(?:baat|बात|ప్లీజ్).{0,16}(?:hindi|हिंदी|హిందీ)|हिंदी में|हिन्दी में|हिंदी बोल|హిందీలో|(?:hindi\s+){2,}/i;
+
+const ENGLISH_REQUEST =
+  /\b(?:talk|speak|switch|reply|answer|please|want|can|you|in).{0,48}\benglish\b|\bin english\b|\benglish please\b|\benglish (?:mein|me|में)\b|\bangrezi\b|\bangreji\b|अंग्रेजी|इंग्लिश|ఇంగ్లీష్|ఇంగ్లిష్|ఇంగ్లీషులో|(?:please|ప్లీజ్).{0,12}(?:english|ఇంగ్లీష్)|(?:english|ఇంగ్లీష్).{0,12}(?:please|ప్లీజ్|లో)/i;
+
 const LANGUAGE_REQUESTS = [
-  { code: "en-IN", re: /\b(?:talk|speak|switch|reply|answer|please|want|in).{0,48}\benglish\b|\bin english\b|\benglish please\b|\benglish (?:mein|me|में)\b|\bnot english\b|\bangrezi\b|\bangreji\b|अंग्रेजी|इंग्लिश|इंग्लिश में|अंग्रेज़ी/i },
-  { code: "hi-IN", re: /\b(?:talk|speak|switch|reply|answer|please).{0,40}\bhindi\b|\bin hindi\b|\bhindi please\b|\bhindi mein\b|\bhindi me\b|हिंदी में|हिन्दी में|हिंदी बोल|हिन्दी बोल/i },
+  { code: "en-IN", re: ENGLISH_REQUEST },
+  { code: "hi-IN", re: HINDI_REQUEST },
   { code: "ta-IN", re: /\b(?:talk|speak|switch).{0,40}\btamil\b|\bin tamil\b|தமிழில்/i },
-  { code: "te-IN", re: /\b(?:talk|speak|switch).{0,40}\btelugu\b|\bin telugu\b|తెలుగులో/i },
+  { code: "te-IN", re: /\b(?:talk|speak|switch).{0,40}\btelugu\b|\bin telugu\b|తెలుగులో|(?:telugu|తెలుగు).{0,20}(?:lo|లో|matlad|మాట్లాడ)/i },
   { code: "mr-IN", re: /\b(?:talk|speak|switch).{0,40}\bmarathi\b|\bin marathi\b|मराठीत/i },
   { code: "bn-IN", re: /\b(?:talk|speak|switch).{0,40}\bbengali\b|\bin bengali\b|\bbangla\b|বাংলায়/i },
   { code: "gu-IN", re: /\b(?:talk|speak|switch).{0,40}\bgujarati\b|\bin gujarati\b|ગુજરાતી/i },
@@ -184,8 +190,31 @@ const LANGUAGE_REQUESTS = [
   { code: "ur-IN", re: /\b(?:talk|speak|switch).{0,40}\burdu\b|\bin urdu\b|اردو میں/i },
 ];
 
+/** Repair Telugu-script STT of English/Hindi language asks before detection. */
+export function normalizeLanguageAsk(text) {
+  let raw = String(text || "").trim();
+  if (!raw) return raw;
+  raw = raw
+    .replace(/ప్లీజ్|ప్లీస్/gi, "please")
+    .replace(/హలో|హెలో/gi, "hello")
+    .replace(/కెన్|కాన్/gi, "can")
+    .replace(/యూ|యు/gi, "you")
+    .replace(/టాక్|టాకు/gi, "talk")
+    .replace(/స్పీక్/gi, "speak")
+    .replace(/ఇన్/gi, "in")
+    .replace(/హిందీ|హింది/gi, "hindi")
+    .replace(/ఇంగ్లీష్|ఇంగ్లిష్|ఇంగ్లీషు|ఆంగ్లం/gi, "english")
+    .replace(/బాత్|బాతు/gi, "baat")
+    .replace(/కరో|కరియే|కరండి/gi, "karo")
+    .replace(/మాట్లాడండి|మాట్లాడు|మాట్లాడ/gi, "baat")
+    .replace(/\bమే\b|\bమెయిన్\b|లో\b/gi, "mein")
+    .replace(/\s+/g, " ")
+    .trim();
+  return raw;
+}
+
 export function detectRequestedLanguage(text) {
-  const raw = String(text || "").trim();
+  const raw = normalizeLanguageAsk(text);
   if (!raw) return null;
   if (
     (/\bniacin\b|नियासिन/i.test(raw))
@@ -196,29 +225,40 @@ export function detectRequestedLanguage(text) {
   for (const { re, code } of LANGUAGE_REQUESTS) {
     if (re.test(raw)) return code;
   }
+  // Fallback: latin "hindi" plus any talk/switch cue (covers messy Telugu-phonetic STT).
+  if (/\bhindi\b/i.test(raw) && /\b(talk|speak|in|mein|me|baat|can|you|please|hello|karo|bolo)\b/i.test(raw)) {
+    return "hi-IN";
+  }
+  if (/\benglish\b/i.test(raw) && /\b(talk|speak|in|mein|me|can|you|please|hello)\b/i.test(raw)) {
+    return "en-IN";
+  }
   return null;
 }
 
-function looksLikeEnglish(text) {
-  const raw = String(text || "").trim();
+export function looksLikeEnglish(text) {
+  const raw = normalizeLanguageAsk(text);
   const letters = raw.replace(/[^A-Za-z]/g, "");
-  if (letters.length < 10) return false;
+  const words = raw.match(/[A-Za-z]+/g) || [];
+  if (letters.length < 6) return false;
+  // Single filler like "please" / "hello" is not enough to switch the call language.
+  if (words.length < 2 && letters.length < 14) return false;
   // Romanized Hindi / Hinglish is not English even with Latin letters.
   if (HINGLISH.test(raw)) return false;
   if (/\b(mein|me|nahi|nahin|samajh|baat|karo|bolo|kya|hai|aap|mujhe|kyun|kyunki)\b/i.test(raw)) {
     return false;
   }
-  return /\b(the|and|you|please|talk|speak|english|what|this|that|have|want|will|just|because|at least|don't|dont|i'm|i am|can you|tell me|why are|why you|calling|date of birth|living in|address|thank you)\b/i.test(raw);
+  return /\b(the|and|you|please|talk|speak|english|what|this|that|have|want|will|just|because|at least|don't|dont|i'm|i am|can you|tell me|why are|why you|calling|date of birth|living in|address|thank you|hello|hi)\b/i.test(raw);
 }
 
 export function detectLanguageFromText(text, fallback = DEFAULT_LANGUAGE) {
-  const raw = String(text || "").trim();
+  const raw = normalizeLanguageAsk(text);
   const current = normalizeLanguage(fallback);
   if (raw.length < 2) return current;
 
   const requested = detectRequestedLanguage(raw);
   if (requested) return requested;
 
+  // Use normalized text so Telugu-script "ప్లీజ్ హిందీ" is not forced to te-IN.
   for (const { re, code } of SCRIPT_LANGS) {
     if (re.test(raw)) return code;
   }

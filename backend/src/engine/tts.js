@@ -5,7 +5,12 @@ import { llmHeaders, resolveTtsConfig, sarvamTtsLanguage } from "./providers.js"
 import { spokenForTts } from "../languages.js";
 import { DATA_DIR } from "../store.js";
 import { ambientEnabled, ambientVolume, mixAmbientIntoSpeech } from "./ambient.js";
-import { applyPronunciations, ensureSarvamDictId, pronunciationCount } from "./pronunciation.js";
+import {
+  applyPronunciations,
+  ensureSarvamDictId,
+  isStaleSarvamDictError,
+  pronunciationCount,
+} from "./pronunciation.js";
 
 const TTS_DIR = path.join(DATA_DIR, "tts");
 
@@ -104,6 +109,34 @@ async function synthesizeSarvam({
   return { buffer, ext };
 }
 
+async function synthesizeSarvamWithDictFallback({
+  agent,
+  pronunciations,
+  dictId: initialDictId,
+  ...options
+}) {
+  let dictId = String(initialDictId || "").trim();
+  try {
+    return { ...(await synthesizeSarvam({ ...options, dictId })), dictId };
+  } catch (error) {
+    if (!dictId || !isStaleSarvamDictError(error)) throw error;
+    console.warn(`Sarvam dict ${dictId} not found — re-uploading with current API key`);
+    if (pronunciationCount(pronunciations) > 0) {
+      try {
+        const newDictId = await ensureSarvamDictId(options.apiKey, pronunciations);
+        if (newDictId) {
+          if (agent?.callSettings) agent.callSettings.sarvamDictId = newDictId;
+          return { ...(await synthesizeSarvam({ ...options, dictId: newDictId })), dictId: newDictId };
+        }
+      } catch (retryError) {
+        if (!isStaleSarvamDictError(retryError)) throw retryError;
+      }
+    }
+    if (agent?.callSettings) agent.callSettings.sarvamDictId = "";
+    return { ...(await synthesizeSarvam({ ...options, dictId: "" })), dictId: "" };
+  }
+}
+
 async function synthesizeOpenAi({ text, voice, model, apiKey, speed = 1 }) {
   const response = await fetch("https://api.openai.com/v1/audio/speech", {
     method: "POST",
@@ -168,7 +201,9 @@ export async function synthesizeSpeech({
   if (!existing) {
     let made =
       tts.provider === "sarvam"
-        ? await synthesizeSarvam({
+        ? await synthesizeSarvamWithDictFallback({
+            agent,
+            pronunciations,
             text: spoken,
             language: tts.language,
             voice: tts.voice,
@@ -194,6 +229,7 @@ export async function synthesizeSpeech({
     await saveClip(id, made.buffer, made.ext);
   }
   const clip = await getTtsClip(id);
+  const resolvedDictId = String(agent?.callSettings?.sarvamDictId || dictId || "").trim();
   return {
     provider: tts.provider,
     id,
@@ -202,6 +238,6 @@ export async function synthesizeSpeech({
     contentType: clip.contentType,
     audioUrl: "/api/tts/" + id,
     publicAudioUrl: publicBaseUrl ? `${publicBaseUrl}/api/tts/${id}` : `/api/tts/${id}`,
-    dictId: dictId || null,
+    dictId: resolvedDictId || null,
   };
 }

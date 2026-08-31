@@ -125,8 +125,8 @@ export default function Settings() {
               />
             </label>
           ))}
-          <p className="muted">Workspace line: {telephony.workspacePhone || "not registered"} · Provider {telephony.twilioReady ? "ready" : "not connected"}</p>
-          <p className="muted">WhatsApp: point Twilio’s messaging webhook to {window.location.origin}/webhooks/twilio/whatsapp. Optional env TWILIO_WHATSAPP_FROM=whatsapp:+1878…</p>
+          <p className="muted">Workspace line: {telephony.workspacePhone || "not registered"} · Exotel {telephony.exotelReady ? "ready" : "not connected"}</p>
+          <p className="muted">Voice calls use Exotel AgentStream. Configure inbound in the Exotel dashboard (VoiceBot applet).</p>
         </section>
       </form>
 

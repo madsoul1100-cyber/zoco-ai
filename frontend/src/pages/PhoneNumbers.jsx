@@ -9,7 +9,13 @@ export default function PhoneNumbers() {
   const [inbound, setInbound] = useState(null);
   const [agents, setAgents] = useState([]);
   const [phoneForm, setPhoneForm] = useState({ workspaceName: "", workspacePhone: "" });
-  const [twilioForm, setTwilioForm] = useState({ accountSid: "", authToken: "", fromNumber: "", publicBaseUrl: "" });
+  const [exotelForm, setExotelForm] = useState({
+    accountSid: "",
+    apiKey: "",
+    apiToken: "",
+    fromNumber: "",
+    publicBaseUrl: "",
+  });
   const [notice, setNotice] = useState("");
   const [error, setError] = useState("");
   const [providerOpen, setProviderOpen] = useState(false);
@@ -21,9 +27,10 @@ export default function PhoneNumbers() {
     setInbound(inboundConfig);
     setAgents(agentList);
     setPhoneForm({ workspaceName: tel.workspaceName || "", workspacePhone: tel.workspacePhone || "" });
-    setTwilioForm({
+    setExotelForm({
       accountSid: tel.accountSid || "",
-      authToken: tel.authTokenSet ? "••••••••" : "",
+      apiKey: tel.apiKeySet ? "••••••••" : "",
+      apiToken: tel.apiTokenSet || tel.authTokenSet ? "••••••••" : "",
       fromNumber: tel.fromNumber || "",
       publicBaseUrl: tel.publicBaseUrl || "",
     });
@@ -45,34 +52,41 @@ export default function PhoneNumbers() {
     setNotice(`Workspace number ${saved.workspacePhone} is on file.`);
   }
 
-  async function saveTwilio(event) {
+  async function saveExotel(event) {
     event.preventDefault();
     setError("");
     const saved = await api.saveTelephony({
       ...phoneForm,
-      accountSid: twilioForm.accountSid.trim(),
-      authToken: twilioForm.authToken.includes("•") ? undefined : twilioForm.authToken.trim(),
-      fromNumber: twilioForm.fromNumber.trim(),
-      publicBaseUrl: twilioForm.publicBaseUrl.trim(),
+      accountSid: exotelForm.accountSid.trim(),
+      apiKey: exotelForm.apiKey.includes("•") ? undefined : exotelForm.apiKey.trim(),
+      apiToken: exotelForm.apiToken.includes("•") ? undefined : exotelForm.apiToken.trim(),
+      fromNumber: exotelForm.fromNumber.trim(),
+      publicBaseUrl: exotelForm.publicBaseUrl.trim(),
     });
     setTelephony(saved);
     setProviderOpen(false);
-    setNotice(saved.twilioReady ? "This number can place and receive live calls." : "Saved. Finish SID, token, From number, and public URL.");
+    setNotice(
+      saved.exotelReady
+        ? "Exotel is connected. Outbound calls will stream through Zoco."
+        : "Saved. Finish account SID, API key, token, Exophone, and public URL."
+    );
     await refresh();
   }
 
   if (!telephony) return <p className="muted">Loading numbers…</p>;
 
   const assigned = agents.find((agent) => agent.id === inbound?.agentId);
+  const streamBase = telephony.publicBaseUrl || "https://your-public-url";
+  const ready = Boolean(telephony.exotelReady ?? telephony.twilioReady);
 
   return (
     <>
       <PageHeader
         title="Phone numbers"
-        subtitle="Workspace mobile for tests. Twilio number for live inbound and outbound."
+        subtitle="Workspace mobile for tests. Exotel Exophone for live inbound and outbound in India."
         actions={
-          <span className={`badge ${telephony.twilioReady ? "done" : "recall"}`}>
-            {telephony.twilioReady ? "Live line ready" : "Connect a provider"}
+          <span className={`badge ${ready ? "done" : "recall"}`}>
+            {ready ? "Live line ready" : "Connect Exotel"}
           </span>
         }
       />
@@ -91,18 +105,18 @@ export default function PhoneNumbers() {
 
         <article className="number-card">
           <div className="number-card-top">
-            <span className={`badge ${telephony.twilioReady ? "done" : "recall"}`}>
-              {telephony.twilioReady ? "Provider" : "Not connected"}
+            <span className={`badge ${ready ? "done" : "recall"}`}>
+              {ready ? "Exotel" : "Not connected"}
             </span>
             <button className="btn ghost" type="button" onClick={() => setProviderOpen(true)}>
-              {telephony.twilioReady ? "Edit" : "Connect Twilio"}
+              {ready ? "Edit" : "Connect Exotel"}
             </button>
           </div>
-          <h3>{telephony.fromNumber || "No Twilio number"}</h3>
+          <h3>{telephony.fromNumber || "No Exophone yet"}</h3>
           <p className="muted">
             {assigned
               ? `Inbound agent: ${assigned.name}`
-              : "Assign an inbound agent after this number is connected."}
+              : "Assign an inbound agent after Exotel is connected."}
           </p>
           <div className="row" style={{ marginTop: 12 }}>
             <Link className="btn ghost" to="/inbound">Inbound calls</Link>
@@ -112,10 +126,13 @@ export default function PhoneNumbers() {
       </div>
 
       <section className="product-sheet" style={{ marginTop: 20 }}>
-        <h3>Inbound webhook</h3>
+        <h3>Voice stream URL</h3>
         <p className="muted">
-          Voice webhook for this number:{" "}
-          <code>{telephony.publicBaseUrl || "https://your-public-url"}/webhooks/twilio/inbound</code>
+          Point Exotel AgentStream / VoiceBot to:{" "}
+          <code>{streamBase}/api/exotel/stream?callId=&lt;call-id&gt;</code>
+        </p>
+        <p className="muted">
+          Status callbacks: <code>{streamBase}/webhooks/exotel/status</code>
         </p>
       </section>
 
@@ -144,20 +161,21 @@ export default function PhoneNumbers() {
 
       <Modal
         open={providerOpen}
-        title="Connect Twilio"
+        title="Connect Exotel"
         onClose={() => setProviderOpen(false)}
         footer={
           <>
             <button className="btn ghost" type="button" onClick={() => setProviderOpen(false)}>Cancel</button>
-            <button className="btn" type="submit" form="twilio-phone">Save provider</button>
+            <button className="btn" type="submit" form="exotel-phone">Save provider</button>
           </>
         }
       >
-        <form id="twilio-phone" className="grid" onSubmit={saveTwilio}>
-          <label>Account SID<input className="input" value={twilioForm.accountSid} onChange={(e) => setTwilioForm({ ...twilioForm, accountSid: e.target.value })} placeholder="ACxxxxxxxx" /></label>
-          <label>Auth Token<input className="input" type="password" value={twilioForm.authToken} onChange={(e) => setTwilioForm({ ...twilioForm, authToken: e.target.value })} /></label>
-          <label>From number<input className="input" value={twilioForm.fromNumber} onChange={(e) => setTwilioForm({ ...twilioForm, fromNumber: e.target.value })} placeholder="+1…" /></label>
-          <label>Public URL<input className="input" value={twilioForm.publicBaseUrl} onChange={(e) => setTwilioForm({ ...twilioForm, publicBaseUrl: e.target.value })} placeholder="https://xxxx.ngrok-free.app" /></label>
+        <form id="exotel-phone" className="grid" onSubmit={saveExotel}>
+          <label>Account SID<input className="input" value={exotelForm.accountSid} onChange={(e) => setExotelForm({ ...exotelForm, accountSid: e.target.value })} placeholder="your-account-sid" /></label>
+          <label>API key<input className="input" value={exotelForm.apiKey} onChange={(e) => setExotelForm({ ...exotelForm, apiKey: e.target.value })} placeholder="API key" /></label>
+          <label>API token<input className="input" type="password" value={exotelForm.apiToken} onChange={(e) => setExotelForm({ ...exotelForm, apiToken: e.target.value })} placeholder="API token" /></label>
+          <label>Exophone<input className="input" value={exotelForm.fromNumber} onChange={(e) => setExotelForm({ ...exotelForm, fromNumber: e.target.value })} placeholder="080… or +91…" /></label>
+          <label>Public URL<input className="input" value={exotelForm.publicBaseUrl} onChange={(e) => setExotelForm({ ...exotelForm, publicBaseUrl: e.target.value })} placeholder="https://voice.my-leader.in" /></label>
         </form>
       </Modal>
     </>

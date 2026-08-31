@@ -51,7 +51,7 @@ export default function DeployCode() {
               ))}
             </select>
           </label>
-          <p className="muted">Live line: {telephony?.twilioReady ? "ready" : "not connected"} · From {telephony?.fromNumber || "—"}</p>
+          <p className="muted">Live line: {telephony?.exotelReady ? "ready" : "not connected"} · Exophone {telephony?.fromNumber || "—"}</p>
           <a className="btn ghost" href={`/embed/${agentId}`} target="_blank" rel="noreferrer">Open widget preview</a>
         </section>
         <section className="card grid">

@@ -4,7 +4,7 @@ import { Modal } from "./ui.jsx";
 import { LANGUAGES, languageLabel } from "../lib/languages.js";
 import { useGreetingGenderSync, withSpokenGreeting } from "../lib/greetingTranslate.js";
 import { brainKey, mergeLlmCatalog, parseBrain, voiceGender } from "../lib/providers.js";
-import { playAudio, speakText, spokenForTts } from "../lib/voice.js";
+import { playAudio, playStreamingTts, speakText, spokenForTts } from "../lib/voice.js";
 import {
   SYSTEM_TOOLS,
   agentTests,
@@ -398,6 +398,20 @@ export function SettingsPanel({
         });
         return;
       }
+      if (agent.ttsProvider === "sarvam") {
+        await playStreamingTts({
+          text: sample,
+          language: agent.language || "en-IN",
+          speaker: agent.ttsVoice || "kavya",
+          model: agent.ttsModel || "bulbul:v3",
+          pace: Number(settings.speakingSpeed ?? 1.02),
+          pitch: Number(settings.pitch || 0),
+          temperature: Number(settings.ttsTemperature ?? 0.58),
+          dictId: settings.sarvamDictId || "",
+          pronunciations: settings.pronunciations || null,
+        });
+        return;
+      }
       const clip = await api.speak({
         text: sample,
         agentId: agent.id,
@@ -408,11 +422,16 @@ export function SettingsPanel({
         callSettings: settings,
       });
       if (clip?.provider === "browser" || !clip?.audioUrl) {
-        throw new Error("This voice needs a Sarvam or OpenAI key in Settings.");
+        throw new Error("This voice needs a Sarvam or OpenAI key in Settings or .env.");
       }
       await playAudio(clip.audioUrl);
     } catch (err) {
-      onError?.(err.message);
+      const msg = String(err?.message || "Preview failed");
+      if (/invalid.*auth|api.?key|403/i.test(msg)) {
+        onError?.("Sarvam API key rejected. Copy a fresh key from dashboard.sarvam.ai → API Keys into .env SARVAM_API_KEY, then restart the backend.");
+      } else {
+        onError?.(msg);
+      }
     } finally {
       setPreviewing(false);
     }

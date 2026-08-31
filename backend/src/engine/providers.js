@@ -139,11 +139,12 @@ export function envKeys() {
 export function mergedKeys(stored = {}) {
   const env = envKeys();
   const saved = stored.keys || {};
+  // .env wins when set — local dev updates apply without clearing Settings UI keys.
   return {
-    openrouter: saved.openrouter || env.openrouter,
-    sarvam: saved.sarvam || env.sarvam,
-    grok: saved.grok || env.grok,
-    openai: saved.openai || env.openai,
+    openrouter: env.openrouter || String(saved.openrouter || "").trim(),
+    sarvam: env.sarvam || String(saved.sarvam || "").trim(),
+    grok: env.grok || String(saved.grok || "").trim(),
+    openai: env.openai || String(saved.openai || "").trim(),
   };
 }
 
@@ -263,9 +264,10 @@ export function sarvamTtsLanguage(code) {
 
 export function publicProviderCatalog(settings = defaultAiSettings()) {
   const keys = mergedKeys(settings);
+  const defaultTts = keys.sarvam ? "sarvam" : (settings.defaultTtsProvider || "browser");
   return {
     defaultLlmProvider: settings.defaultLlmProvider || "openrouter",
-    defaultTtsProvider: settings.defaultTtsProvider || "browser",
+    defaultTtsProvider: defaultTts,
     llm: LLM_PROVIDERS.map((item) => ({
       id: item.id,
       label: item.label,

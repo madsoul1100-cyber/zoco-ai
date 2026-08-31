@@ -34,6 +34,7 @@ export const api = {
   sendMessageStream: async (id, text, {
     onDelta,
     onUser,
+    onLanguage,
     source = "chat",
     signal,
     languageHint = "",
@@ -74,6 +75,7 @@ export const api = {
           const event = JSON.parse(line.slice(6));
           if (event.type === "user") onUser?.(event.text);
           if (event.type === "delta") onDelta?.(event.text);
+          if (event.type === "language") onLanguage?.(event.language, event.languageLocked);
           if (event.type === "done") call = event.call;
           if (event.type === "error") throw new Error(event.error);
         }

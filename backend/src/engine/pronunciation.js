@@ -17,6 +17,15 @@ export const PRIYA_DICT_PATH = path.join(ROOT, "data", "priya-tts-dictionary.jso
 
 const dictIdCache = new Map();
 
+export function isStaleSarvamDictError(error) {
+  const msg = String(error?.message || error || "").toLowerCase();
+  return msg.includes("pronunciation dictionary") && msg.includes("not found");
+}
+
+export function clearSarvamDictCache() {
+  dictIdCache.clear();
+}
+
 export function normalizeLangCode(code) {
   const raw = String(code || "").trim();
   if (!raw) return "en-IN";

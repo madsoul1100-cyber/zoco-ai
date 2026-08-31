@@ -3,7 +3,7 @@
  * Fast path: short spoken text + optional [END:disposition] tag. No JSON-mode round trip.
  */
 
-import { detectLanguageFromText, detectRequestedLanguage, getLanguage } from "../languages.js";
+import { detectLanguageFromText, detectRequestedLanguage, getLanguage, looksLikeEnglish } from "../languages.js";
 import { getAiSettings } from "../store.js";
 import { fallbackLlmConfig, llmHeaders, resolveLlmConfig, speakerGender } from "./providers.js";
 import { openAiTools, runToolCall } from "./tools.js";
@@ -89,6 +89,25 @@ function workflowInstruction(agent) {
   return `Call flow — follow stages and branches. Do not say stage names out loud.\n${lines.join("\n")}`;
 }
 
+function voiceObjectiveReminder(agent, history, slots) {
+  const parts = [];
+  const goal = String(agent?.successCriteria || agent?.useCase || "").trim();
+  if (goal) parts.push(`Call objective: ${goal}`);
+  const qualify = String(agent?.qualifyPrompt || "").trim();
+  if (qualify) parts.push(`When moving forward, work toward: ${qualify}`);
+  const userTurns = (history || []).filter((m) => m.role === "user").length;
+  if (userTurns <= 1) {
+    parts.push("Early in the call: finish your greeting or purpose in full, then ask one clear question. Do not stop after only Namaskaram / hello / जी.");
+  } else {
+    parts.push("Mid-call: stay warm and empathetic, but keep steering toward the objective. Know what you still need (complaint details, address, eligibility, payment plan, etc.) and ask for the next missing piece.");
+  }
+  const known = slots && typeof slots === "object" ? Object.entries(slots).filter(([, v]) => v) : [];
+  if (known.length) {
+    parts.push(`Already captured — do not re-ask: ${known.map(([k, v]) => `${k}=${v}`).join(", ")}`);
+  }
+  return parts.join("\n");
+}
+
 function languageInstruction(agent) {
   const lang = getLanguage(agent?.language);
   const gender = speakerGender(agent);
@@ -160,6 +179,7 @@ Hard speech rules from the Instructions (never break these):
         ? `Persona: ${agent.persona}`
         : "",
     voiceStream ? "" : workflowInstruction(agent),
+    voiceStream && agent?.workflow?.enabled ? workflowInstruction(agent) : "",
     !voiceStream && Array.isArray(agent.outputVariables) && agent.outputVariables.length
       ? `After the call you must be able to fill these output variables from what was said: ${agent.outputVariables.map((item) => `${item.key} (${item.dataType || "string"}): ${item.prompt || ""}`).join("; ")}`
       : "",
@@ -169,8 +189,9 @@ Hard speech rules from the Instructions (never break these):
     knowledge ? `Use this knowledge base only when the customer asks something factual. Never read it out as a list. Knowledge:\n${knowledge}` : "",
     slots && Object.keys(slots).length ? `Known details: ${JSON.stringify(slots)}` : "",
     voiceStream
-      ? "VOICE STREAM: At most TWO short spoken sentences. Complete your point in this turn — never stop at only okay / ठीक है / जी हाँ / हाँ. After a language switch, confirm the language AND say why you called (Graduate MLC) and ask for ~30 seconds in the SAME turn. If ending, close fully then [END:...]. If continuing, finish with one clear question."
+      ? "VOICE STREAM: At most TWO short spoken sentences. Complete your point in this turn — never stop at only okay / ठीक है / जी हाँ / हाँ / Namaskaram. After a language switch, confirm the language AND say why you called and ask for ~30 seconds in the SAME turn. If ending, close fully then [END:...]. If continuing, finish with one clear question."
       : "",
+    voiceStream ? voiceObjectiveReminder(agent, history, slots) : "",
     `LISTEN FIRST (hard rule): The customer's latest message is the only thing you must answer on this turn. If they ask who you are, why you called, what this is about, what you want to say next, or ask to change language, answer that clearly before any script question (graduation year, Form 18, district, etc.). Never ignore their words to push the outbound pitch. Never invent that they agreed to something they did not say.`,
     `COMPLETE THE TURN (hard rule): Do not leave a dangling acknowledgement. Every reply must either (1) fully close the call with the correct ending line + [END:...], or (2) deliver the next useful point and end with one question. Never say only “okay / ठीक है / धन्यवाद” and wait.`,
     `SOUND HUMAN (hard rule): Speak like a real person on a phone — warm, brief, conversational. Keep natural punctuation (?, !, commas, ।) so TTS can breathe and ask questions with real intonation. Avoid stiff IVR phrasing.`,
@@ -227,6 +248,9 @@ function sanitizeSpoken(text, language = "te-IN") {
   const code = getLanguage(language).code;
   if (code === "hi-IN") {
     next = next
+      .replace(/[\u0C00-\u0C7F]+/g, " ")
+      .replace(/గారు/g, "जी")
+      .replace(/అండి/g, "")
       .replace(/ग्रेजुएट/gi, "Graduate")
       .replace(/एम\.?\s*एल\.?\s*सी\.?|एमएलसी/gi, "MLC")
       .replace(/वोटर/gi, "voter")
@@ -309,9 +333,13 @@ function enforceClosingLine(parsed, language = "te-IN") {
   return parsed;
 }
 
-export function guardEarlyHangup(parsed, call) {
+export function guardEarlyHangup(parsed, call, userText = "") {
   const userTurns = (call?.messages || []).filter((m) => m.role === "user").length;
   const allowed = ["not_interested", "do_not_call", "wrong_person", "callback_requested"];
+  const confused = /samajh nahi|smjh nahi|समझ नहीं|don't understand|didn't understand|sunai nahi|सुनाई नहीं/i.test(String(userText || ""));
+  if (confused && parsed.endCall) {
+    return { ...parsed, endCall: false, disposition: null };
+  }
   if (parsed.endCall && userTurns < 2 && !allowed.includes(parsed.disposition)) {
     return { ...parsed, endCall: false, disposition: null };
   }
@@ -334,15 +362,20 @@ export function detectCallerIntent(userText) {
   const wrongPerson = /wrong (person|number)|galat (number|person|aadmi|banda)|गलत (नंबर|व्यक्ति|आदमी)|వేరే (వ్యక్తి|నెంబర్|వాళ్ళు)|not (me|him|her)\b|main ravi nahi (hoon|hun)|मेरा नाम नहीं|मैं रवि नहीं हूँ|मैं वो नहीं हूँ|నేను కాదు|wrong (log|banda)/i.test(text);
   const notGraduate = /not (a )?graduate|graduate (nahi|nahin|नहीं)|didn'?t study( at all)?|never studied|no degree|ग्रेजुएट नहीं|graduation नहीं|पढ़ाई नहीं की|कभी पढ़ाई नहीं|డిగ్రీ లేదు|graduate కాదు|చదువుకోలేదు|చదవలేదు/i.test(text);
   const outsideCity = /\b(chandigarh|mohali|delhi|mumbai|punjab|haryana|bangalore|bengaluru|kolkata|jaipur|pune)\b/i.test(text)
-    || /चंडीगढ़|चण्डीगढ़|मोहाली|दिल्ली|मुंबई|पंजाब|हरियाणा/.test(text);
+    || /चंडीगढ़|चण्डीगढ़|मोहाली|महाली|मोहली|दिल्ली|मुंबई|पंजाब|हरियाणा/.test(text);
   const declineArea = /not for me|won'?t be for me|mere liye.{0,40}(nahi|nahin|नहीं)|मेरे लिए.{0,40}(नहीं|ना)|नहीं होगा|ye mere liye|यह मेरे लिए|out of (area|state|constituency)|दूसरे (शहर|राज्य)|different (city|state)|इधर का नहीं|उधर (साइड|side)|mere area|hyderabad.{0,24}(nahi|नहीं)|constituency.{0,24}(nahi|नहीं)/i.test(text);
+  const livesOutside = /मोहाली|महाली|मैं.{0,20}(रहता|रहती|रहते).{0,20}(हूँ|हूं|है)|live in| रहता हूँ| रहती हूँ/i.test(text)
+    && outsideCity;
   const outOfArea = !notGraduate && (
-    declineArea || (outsideCity && /(nahi|nahin|नहीं|not for|won'?t|नहीं होगा|ka nahi|का नहीं)/i.test(text))
+    declineArea
+    || livesOutside
+    || (outsideCity && /(nahi|nahin|नहीं|not for|won'?t|नहीं होगा|ka nahi|का नहीं)/i.test(text))
   );
   const doNotCall = /do not call|don't call|dnc|कॉल मत|फोन मत|दोबारा (मत|नहीं)|మళ్లీ call చేయవద్దు/i.test(text);
   const callbackRequested = !doNotCall && /call (me )?(back )?(tomorrow|later|in the evening|at \d)|(?:kal|baad mein|shaam ko).{0,30}call|कल.{0,30}(कॉल|फोन)|बाद में.{0,30}(कॉल|फोन)|తర్వాత.{0,30}call|రేపు.{0,30}call/i.test(text);
   // User asking the agent to continue / explain is NOT a refusal.
-  const wantsContinue = /क्या बात|आगे (बता|बात|क्या)|what (do you|did you|is it)|tell me|बोलना है|बताना चाह|बात करो|आगे करो|kyun call|why (did you|are you) call/i.test(text);
+  const wantsClarification = /samajh nahi|smjh nahi|smjh nhi|समझ नहीं|समझaye|don't understand|did not understand|didn't understand|kya bola|क्या बोल|repeat|फिर से|दोबारा|dobara|once again|clear nahi|साफ नहीं|artham kaledu|అర్థం కాల|sunai nahi|सुनाई नहीं/i.test(text);
+  const wantsContinue = /क्या बात|आगे (बता|बात|क्या)|what (do you|did you|is it)|tell me|बोलना है|बताना चाह|बात करो|आगे करो|kyun call|why (did you|are you) call/i.test(text) || wantsClarification;
   const softRefuse = /(मन नहीं|दिल नहीं|रुचि नहीं|दिलचस्पी नहीं|बात नहीं करनी|नहीं करना चाह|interested नहीं|not interested|no thanks|not now|వద్దు|అక్కర్లేదు)/i.test(text);
   const notInterested = !wrongPerson && !wantsContinue && (
     doNotCall
@@ -486,19 +519,55 @@ export function followCustomerLanguage(call, agent, userText) {
     ? call._sttLanguageHint
     : "";
   if (call) delete call._sttLanguageHint;
-  if (settings.switchLanguage === false && !requested) {
-    if (call) call.language = current;
-    return current;
+
+  if (requested && call) {
+    call.language = requested;
+    call.languageLocked = requested;
+    return requested;
   }
-  const detected = requested || sttHint || (settings.autoDetectLanguage === false
-    ? current
-    : detectLanguageFromText(userText, current));
+
+  const locked = call?.languageLocked && /^(te|hi|en)-IN$/.test(String(call.languageLocked))
+    ? call.languageLocked
+    : null;
+
+  if (settings.switchLanguage === false && !requested) {
+    if (call) call.language = locked || current;
+    return locked || current;
+  }
+
+  const fromText = settings.autoDetectLanguage === false
+    ? (locked || current)
+    : detectLanguageFromText(userText, locked || current);
+
+  // Prefer text/script over a wrong te-IN STT hint when the caller clearly spoke English/Hindi.
+  let detected = fromText;
+  if (sttHint) {
+    const hasDevanagari = /[\u0900-\u097F]/.test(String(userText || ""));
+    const hasTelugu = /[\u0C00-\u0C7F]/.test(String(userText || ""));
+    const english = looksLikeEnglish(userText);
+    if (hasDevanagari) detected = "hi-IN";
+    else if (english && !hasTelugu) detected = "en-IN";
+    else if (fromText === "hi-IN" || fromText === "en-IN") detected = fromText;
+    else detected = sttHint;
+  }
+
+  // STT often writes Hindi speech in Telugu script — do not drop back to Telugu after a Hindi lock.
+  if (locked === "hi-IN" && detected === "te-IN" && /[\u0C00-\u0C7F]/.test(userText) && !/[\u0900-\u097F]/.test(userText)) {
+    detected = "hi-IN";
+  }
+  if (locked === "en-IN" && detected !== "en-IN" && /[\u0900-\u097F\u0C00-\u0C7F]/.test(userText) && looksLikeEnglish(userText)) {
+    detected = "en-IN";
+  }
+
   const allowed = settings.allowedLanguages;
-  let next = detected;
-  if (!requested && Array.isArray(allowed) && allowed.length && !allowed.includes(detected)) {
+  let next = locked && !requested ? locked : detected;
+  if (!requested && !locked && Array.isArray(allowed) && allowed.length && !allowed.includes(detected)) {
     next = current;
   }
-  if (call) call.language = next;
+  if (call) {
+    call.language = next;
+    if (locked) call.languageLocked = locked;
+  }
   return next;
 }
 
@@ -531,7 +600,7 @@ export async function generateReply({ agent, call, userText, knowledge = "", kno
         knowledgeFn,
       });
       return {
-        ...normalizeEndDisposition(guardEarlyHangup(result, call), speaking, userText),
+        ...normalizeEndDisposition(guardEarlyHangup(result, call, userText), speaking, userText),
         slots,
         provider: llm.provider,
         model: llm.model,
@@ -552,7 +621,7 @@ export async function generateReply({ agent, call, userText, knowledge = "", kno
             knowledgeFn,
           });
           return {
-            ...normalizeEndDisposition(guardEarlyHangup(result, call), speaking, userText),
+            ...normalizeEndDisposition(guardEarlyHangup(result, call, userText), speaking, userText),
             slots,
             provider: backup.provider,
             model: backup.model,
@@ -637,12 +706,39 @@ async function completeWithTools({ agent, call, history, userText, slots, llm, k
   return parsed;
 }
 
+function enforceLanguageReply(parsed, agent, userText) {
+  if (!parsed?.text) return parsed;
+  const requested = detectRequestedLanguage(userText);
+  const lang = getLanguage(agent?.language).code;
+  const text = String(parsed.text || "");
+  if (requested === "hi-IN" || lang === "hi-IN") {
+    if (/[\u0C00-\u0C7F]{4,}/.test(text) && !/[\u0900-\u097F]{4,}/.test(text)) {
+      return {
+        ...parsed,
+        text: "हाँ, हिंदी में बात कर सकती हूँ। Graduate MLC voter registration के बारे में बस तीस seconds बात करनी थी—क्या अभी समय है?",
+      };
+    }
+  }
+  if (requested === "en-IN" || lang === "en-IN") {
+    if (/[\u0900-\u097F]{4,}|[\u0C00-\u0C7F]{4,}/.test(text) && !/[A-Za-z]{12,}/.test(text)) {
+      return {
+        ...parsed,
+        text: "Sure, I can speak in English. This is about Graduate MLC voter registration—may I take thirty seconds?",
+      };
+    }
+  }
+  return parsed;
+}
+
 function cannedVoiceTurn({ agent, history, userText, slots }) {
   const usersBefore = (history || []).filter((m) => m.role === "user").length;
   const turn = Math.max(0, usersBefore);
   const text = String(userText || "").trim();
+  const lang = getLanguage(agent?.language).code;
   const name = String(slots?.customer_name || slots?.name || "").trim();
-  const honorific = name ? `${name} గారు` : "గారు";
+  const honorific = name
+    ? (lang === "hi-IN" ? `${name} जी` : lang === "en-IN" ? name : `${name} గారు`)
+    : (lang === "hi-IN" ? "जी" : lang === "en-IN" ? "" : "గారు");
 
   // Intent endings apply on any turn (not only the first reply).
   const intent = intentDrivenReply(agent, userText);
@@ -673,27 +769,6 @@ function cannedVoiceTurn({ agent, history, userText, slots }) {
   }
 
   const activeLanguage = getLanguage(agent?.language).code;
-  if (/kyun call|kyu call|क्यों (कॉल|फोन)|why (are|did) you call|ఎందుకు call/i.test(text)) {
-    if (activeLanguage === "hi-IN") {
-      return {
-        text: "Graduate MLC voter registration की जानकारी और मदद के लिए कॉल किया है। क्या मैं तीस seconds में बता दूँ?",
-        endCall: false,
-        disposition: null,
-      };
-    }
-    if (activeLanguage === "en-IN") {
-      return {
-        text: "I called to explain Graduate MLC voter registration and offer help. May I take thirty seconds?",
-        endCall: false,
-        disposition: null,
-      };
-    }
-    return {
-      text: "Graduate MLC voter registration గురించి సమాచారం, help ఇవ్వడానికి call చేశాను. ముప్పై seconds చెప్పొచ్చా?",
-      endCall: false,
-      disposition: null,
-    };
-  }
 
   if (/form\s*18.{0,30}(kya|क्या|what)|(?:kya|क्या|what).{0,30}form\s*18/i.test(text)) {
     if (activeLanguage === "hi-IN") {
@@ -712,6 +787,89 @@ function cannedVoiceTurn({ agent, history, userText, slots }) {
     }
     return {
       text: "Form 18, Graduate MLC voter listలో registration కోసం. Official link WhatsAppలో పంపమంటారా?",
+      endCall: false,
+      disposition: null,
+    };
+  }
+
+  if (
+    !/form\s*18/i.test(text)
+    && /samajh nahi|smjh nahi|smjh nhi|समझ नहीं|don't understand|didn't understand|sunai nahi|सुनाई नहीं|kya bola|क्या बोल|फिर से|दोबारा|dobara|repeat/i.test(text)
+  ) {
+    if (activeLanguage === "hi-IN") {
+      return {
+        text: "कोई बात नहीं, मैं आसान Hindi में समझाती हूँ। Graduate MLC voter registration के लिए Form 18 होता है—क्या thirty seconds में छोटी जानकारी सुनेंगे?",
+        endCall: false,
+        disposition: null,
+      };
+    }
+    if (activeLanguage === "en-IN") {
+      return {
+        text: "No problem, I'll explain simply. This call is about Graduate MLC voter registration and Form 18—may I take thirty seconds?",
+        endCall: false,
+        disposition: null,
+      };
+    }
+    return {
+      text: "సరే అండి, సులభంగా చెబుతాను. Graduate MLC voter registration, Form 18 గురించి—ముప్పై seconds చెప్పొచ్చా?",
+      endCall: false,
+      disposition: null,
+    };
+  }
+
+  if (
+    activeLanguage === "hi-IN"
+    && turn > 0
+    && text.length <= 16
+    && /[\u0C00-\u0C7F]/.test(text)
+    && !/[\u0900-\u097F]/.test(text)
+  ) {
+    return {
+      text: "मुझे ठीक से सुनाई नहीं दिया। कृपया Hindi में दोबारा बोलिए—Graduate MLC registration के बारे में बात करनी है।",
+      endCall: false,
+      disposition: null,
+    };
+  }
+
+  if (/who are you|aap kaun|आप कौन|aap kon|kon bol rahe|कौन बोल|identify yourself|your name/i.test(text)) {
+    if (activeLanguage === "hi-IN") {
+      return {
+        text: "मैं प्रिया हूँ, Amarnath Sarangula की टीम से voice assistant। Graduate MLC voter registration के बारे में बताने आई हूँ—क्या thirty seconds दे सकते हैं?",
+        endCall: false,
+        disposition: null,
+      };
+    }
+    if (activeLanguage === "en-IN") {
+      return {
+        text: "I'm Priya, a voice assistant from Amarnath Sarangula's team. I called about Graduate MLC voter registration—may I take thirty seconds?",
+        endCall: false,
+        disposition: null,
+      };
+    }
+    return {
+      text: "నేను ప్రియ, Amarnath Sarangula team నుంచి voice assistant. Graduate MLC voter registration గురించి చెప్పడానికి call చేశాను—ముప్పై seconds ఇవ్వగలరా?",
+      endCall: false,
+      disposition: null,
+    };
+  }
+
+  if (/kyun call|kyu call|क्यों (कॉल|फोन)|why (are|did) you call|ఎందుకు call|किस लिए call|call kyun/i.test(text)) {
+    if (activeLanguage === "hi-IN") {
+      return {
+        text: "Graduate MLC voter registration की जानकारी और मदद के लिए कॉल किया है। क्या मैं तीस seconds में बता दूँ?",
+        endCall: false,
+        disposition: null,
+      };
+    }
+    if (activeLanguage === "en-IN") {
+      return {
+        text: "I called to explain Graduate MLC voter registration and offer help. May I take thirty seconds?",
+        endCall: false,
+        disposition: null,
+      };
+    }
+    return {
+      text: "Graduate MLC voter registration గురించి సమాచారం, help ఇవ్వడానికి call చేశాను. ముప్పై seconds చెప్పొచ్చా?",
       endCall: false,
       disposition: null,
     };
@@ -873,7 +1031,11 @@ export async function streamReply({ agent, call, userText, knowledge = "", onTok
     }
     return {
       ...normalizeEndDisposition(
-        guardEarlyHangup(parseSpoken(full, speaking.language || call?.language), call),
+        enforceLanguageReply(
+          guardEarlyHangup(parseSpoken(full, speaking.language || call?.language), call, userText),
+          speaking,
+          userText
+        ),
         speaking,
         userText
       ),
@@ -895,7 +1057,11 @@ export async function streamReply({ agent, call, userText, knowledge = "", onTok
       });
       if (result.text) onToken?.(result.text);
       return {
-        ...normalizeEndDisposition(guardEarlyHangup(result, call), speaking, userText),
+        ...normalizeEndDisposition(
+          enforceLanguageReply(guardEarlyHangup(result, call, userText), speaking, userText),
+          speaking,
+          userText
+        ),
         slots,
         provider: llm.provider,
         model: llm.model,

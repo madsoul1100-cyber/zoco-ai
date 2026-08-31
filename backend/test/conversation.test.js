@@ -144,7 +144,44 @@ test("Priya silence nudges follow the active call language", () => {
   assert.equal(result.text, "हैलो, आप सुन रहे हैं?");
 });
 
+test("Telugu-script Hindi request switches to Hindi canned reply", async () => {
+  const text = "హిందీలో మాట్లాడandi";
+  const call = firstTurn(text);
+  const result = await streamReply({ agent, call, userText: text, onToken: () => {} });
+
+  assert.equal(call.language, "hi-IN");
+  assert.equal(result.provider, "canned");
+  assert.match(result.text, /^हाँ, हिंदी में/);
+  assert.doesNotMatch(result.text, /[\u0C00-\u0C7F]/);
+});
+
+test("Devanagari Hindi request switches to Hindi canned reply", async () => {
+  const text = "क्या हिंदी में बात";
+  const call = firstTurn(text);
+  const result = await streamReply({ agent, call, userText: text, onToken: () => {} });
+
+  assert.equal(call.language, "hi-IN");
+  assert.equal(result.provider, "canned");
+  assert.match(result.text, /^हाँ, हिंदी में/);
+});
+
 test("Sarvam language hint keeps Telugu speech in Telugu despite Latin transcript", () => {
+  const call = {
+    language: "te-IN",
+    _sttLanguageHint: "te-IN",
+  };
+  // Ambiguous Latin that is not clear English — STT te-IN hint wins.
+  const language = followCustomerLanguage(
+    call,
+    agent,
+    "namaskaram andi oka nimisham"
+  );
+  assert.equal(language, "te-IN");
+  assert.equal(call.language, "te-IN");
+  assert.equal("_sttLanguageHint" in call, false);
+});
+
+test("clear English speech switches off Telugu even if STT hinted te-IN", () => {
   const call = {
     language: "te-IN",
     _sttLanguageHint: "te-IN",
@@ -152,9 +189,40 @@ test("Sarvam language hint keeps Telugu speech in Telugu despite Latin transcrip
   const language = followCustomerLanguage(
     call,
     agent,
-    "I am asking why you called me"
+    "Please talk in English"
   );
-  assert.equal(language, "te-IN");
-  assert.equal(call.language, "te-IN");
-  assert.equal("_sttLanguageHint" in call, false);
+  assert.equal(language, "en-IN");
+  assert.equal(call.languageLocked, "en-IN");
+});
+
+test("Telugu-phonetic English 'talk in hindi' switches on first turn", async () => {
+  const text = "హలో కెన్ యు టాక్ ఇన్ hindi";
+  const call = firstTurn(text);
+  const result = await streamReply({ agent, call, userText: text, onToken: () => {} });
+  assert.equal(call.language, "hi-IN");
+  assert.equal(call.languageLocked, "hi-IN");
+  assert.equal(result.provider, "canned");
+  assert.match(result.text, /^हाँ, हिंदी में/);
+});
+
+test("mixed hindi మే baat karo switches to Hindi", async () => {
+  const text = "hindi మే hindi మే బాత్ కరో hindi మే";
+  const call = firstTurn(text);
+  const result = await streamReply({ agent, call, userText: text, onToken: () => {} });
+  assert.equal(call.language, "hi-IN");
+  assert.equal(result.provider, "canned");
+});
+
+test("Telugu-script Hindi please is treated as Hindi request", () => {
+  const call = {
+    language: "te-IN",
+    _sttLanguageHint: "te-IN",
+  };
+  const language = followCustomerLanguage(
+    call,
+    agent,
+    "ప్లీజ్ హిందీ"
+  );
+  assert.equal(language, "hi-IN");
+  assert.equal(call.languageLocked, "hi-IN");
 });

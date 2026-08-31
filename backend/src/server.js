@@ -3,11 +3,12 @@ import express from "express";
 import http from "node:http";
 import multer from "multer";
 import { v4 as uuid } from "uuid";
-import { generateReply, streamReply } from "./engine/conversation.js";
+import { generateReply, streamReply, followCustomerLanguage } from "./engine/conversation.js";
 import { renderGreeting } from "./engine/template.js";
 import { applyOutcome, dashboardStats, DISPOSITIONS } from "./engine/rules.js";
 import { publicProviderCatalog, resolveLlmConfig } from "./engine/providers.js";
 import { sttReady, transcribeAudio, transcribeFromUrl } from "./engine/stt.js";
+import { mountExotelStream } from "./engine/exotelStream.js";
 import { mountSttStream } from "./engine/sttStream.js";
 import { mountTtsStream } from "./engine/ttsStream.js";
 import { QUIET_OFFICE_PATH } from "./engine/ambient.js";
@@ -23,8 +24,10 @@ import { getRecordingStream, uploadRecording } from "./infra/s3.js";
 import { loadEnv } from "./loadEnv.js";
 import { normalizePhone } from "./phone.js";
 import { authMiddleware, mountAuthRoutes } from "./routes/auth.js";
+import { mountLiveKitRoutes } from "./routes/livekit.js";
 import { mountProductRoutes } from "./routes/product.js";
 import { mountWidgetRoutes } from "./routes/widget.js";
+import { publicLiveKitStatus } from "./services/livekit.js";
 import {
   attachTurn,
   handleCallJob,
@@ -36,16 +39,16 @@ import {
 import {
   gatherTwiml,
   hangupTwiml,
+  mapExotelStatus,
   mapTwilioStatus,
   publicTelephony,
   recordListenTwiml,
-  redirectTwilioCall,
   resolveTelephony,
   sendWhatsApp,
   syncInboundWebhook,
   transferTwiml,
   whatsappFromNumber,
-} from "./telephony/twilio.js";
+} from "./telephony/index.js";
 import {
   commitAgentVersion,
   deleteAgent,
@@ -89,6 +92,7 @@ app.use(authMiddleware);
 mountAuthRoutes(app);
 mountWidgetRoutes(app);
 mountProductRoutes(app, { upload });
+mountLiveKitRoutes(app);
 
 app.get("/api/health", async (_req, res) => {
   const settings = await getAiSettings();
@@ -104,6 +108,7 @@ app.get("/api/health", async (_req, res) => {
     providers: publicProviderCatalog(settings),
     telephony: publicTelephony(telephony),
     infra: await infraHealth(),
+    livekit: publicLiveKitStatus(),
   });
 });
 
@@ -212,6 +217,14 @@ app.post("/api/tts", async (req, res) => {
       skipAmbient: Boolean(req.body?.skipAmbient) || req.body?.source === "studio",
       source: String(req.body?.source || ""),
     });
+    const prevDictId = String(stored?.callSettings?.sarvamDictId || "").trim();
+    const nextDictId = String(agent.callSettings?.sarvamDictId || "").trim();
+    if (stored?.id && prevDictId !== nextDictId) {
+      await saveAgent({
+        ...stored,
+        callSettings: { ...(stored.callSettings || {}), sarvamDictId: nextDictId },
+      });
+    }
     res.json(spoken || { provider: "browser" });
   } catch (error) {
     res.status(400).json({ error: error.message });
@@ -341,13 +354,19 @@ app.get("/api/telephony", async (_req, res) => {
 app.put("/api/telephony", async (req, res) => {
   const current = await getTelephony();
   const body = req.body || {};
-  const authToken =
-    !body.authToken || body.authToken.includes("•") ? current.authToken : body.authToken;
+  const apiKey = String(body.apiKey ?? current.apiKey ?? "").trim();
+  const apiToken =
+    !body.apiToken || String(body.apiToken).includes("•")
+      ? !body.authToken || String(body.authToken).includes("•")
+        ? current.apiToken || current.authToken || ""
+        : String(body.authToken).trim()
+      : String(body.apiToken).trim();
   const tel = await resolveTelephony();
   await saveTelephony({
     ...current,
     ...body,
-    authToken,
+    apiKey,
+    apiToken,
     workspacePhone: normalizePhone(body.workspacePhone || current.workspacePhone),
     fromNumber: normalizePhone(body.fromNumber || current.fromNumber || tel.fromNumber),
     publicBaseUrl: String(body.publicBaseUrl || current.publicBaseUrl || tel.publicBaseUrl || "").replace(
@@ -356,9 +375,9 @@ app.put("/api/telephony", async (req, res) => {
     ),
   });
   const nextTel = await resolveTelephony();
-  if (nextTel.twilioReady) {
+  if (nextTel.exotelReady) {
     await syncInboundWebhook(nextTel).catch((error) => {
-      console.warn("Could not point Twilio inbound webhook:", error.message);
+      console.warn("Could not sync Exotel inbound line:", error.message);
     });
   }
   res.json(publicTelephony(nextTel));
@@ -697,6 +716,13 @@ app.post("/api/calls/:id/messages/stream", async (req, res) => {
     await saveCall(call);
     emit({ type: "user", text: userText });
 
+    followCustomerLanguage(call, agent, userText);
+    emit({
+      type: "language",
+      language: call.language,
+      languageLocked: call.languageLocked || null,
+    });
+
     // Skip KB retrieval on short/ack turns — it blocks time-to-first-token.
     const needsKb = /form\s*18|mlc|register|constituency|graduate|election|voter|amarnath|sarangula|eligib|document|deadline|last date|official link|ఫారం|ఎన్నిక|జిల్లా|డిస్ట్రిక్ట్|ఓటర్|అమర్నాథ్|అర్హత|పత్రాలు|ग्रेजुएट|चुनाव|मतदाता|अमरनाथ|योग्यता|दस्तावेज|आखिरी तारीख|year/i.test(userText)
       || userText.length > 48;
@@ -708,14 +734,8 @@ app.post("/api/calls/:id/messages/stream", async (req, res) => {
       call,
       userText,
       knowledge,
-      // Voice must never expose tool/control text before parseSpoken sanitizes it.
-      onToken: source === "voice"
-        ? () => {}
-        : (token) => emit({ type: "delta", text: token }),
+      onToken: (token) => emit({ type: "delta", text: token }),
     });
-    if (source === "voice" && reply.text) {
-      emit({ type: "delta", text: reply.text });
-    }
 
     call.gathered = { ...(call.gathered || {}), ...(reply.slots || {}) };
     call.llm = { provider: reply.provider, model: reply.model || null };
@@ -1243,6 +1263,47 @@ app.post("/webhooks/twilio/status", async (req, res) => {
   res.sendStatus(204);
 });
 
+app.post("/webhooks/exotel/status", async (req, res) => {
+  const callId = req.query.callId || req.body?.CustomField || req.body?.customfield;
+  const call = callId ? await getCall(String(callId)) : null;
+  if (!call) return res.sendStatus(204);
+
+  const mapped = mapExotelStatus(req.body?.Status || req.body?.CallStatus || req.body?.EventType);
+  const recordingUrl = req.body?.RecordingUrl || req.body?.recordingurl;
+  if (recordingUrl) {
+    call.recordingUrl = recordingUrl;
+  }
+
+  if (!mapped) {
+    await saveCall(call);
+    return res.sendStatus(204);
+  }
+
+  if (mapped.status === "completed") {
+    if (call.endedAt || !["queued", "ringing", "in_progress"].includes(call.status)) {
+      return res.sendStatus(204);
+    }
+    const rules = await getRules();
+    const next = applyOutcome(call, { status: "dropped", disposition: "dropped", reason: "Customer hung up" }, rules);
+    await saveCall(next);
+    await scheduleFollowUp(next);
+    return res.sendStatus(204);
+  }
+
+  if (["busy", "no_answer", "failed"].includes(mapped.status)) {
+    const rules = await getRules();
+    const next = applyOutcome(call, { status: mapped.status, disposition: mapped.disposition, reason: `Exotel ${req.body?.Status || req.body?.CallStatus}` }, rules);
+    await saveCall(next);
+    await scheduleFollowUp(next);
+    return res.sendStatus(204);
+  }
+
+  call.status = mapped.status;
+  if (mapped.disposition) call.disposition = mapped.disposition;
+  await saveCall(call);
+  res.sendStatus(204);
+});
+
 app.post("/webhooks/twilio/recording", async (req, res) => {
   const status = String(req.body?.RecordingStatus || "completed").toLowerCase();
   if (status === "in-progress" || status === "absent") return res.sendStatus(204);
@@ -1375,6 +1436,7 @@ const boot = async () => {
   const server = http.createServer(app);
   mountSttStream(server);
   mountTtsStream(server);
+  mountExotelStream(server);
   server.listen(PORT, () => {
     console.log(`Zoco AI API on http://localhost:${PORT}`);
   });
@@ -1382,10 +1444,10 @@ const boot = async () => {
   console.log(
     `Infra mongo=${infra.mongo} redis=${infra.redis} s3=${infra.s3} queue=${infra.queue}`
   );
-  if (tel.twilioReady) {
-    console.log(`Live calling ready: ${tel.fromNumber} → webhooks at ${tel.publicBaseUrl}`);
+  if (tel.exotelReady || tel.twilioReady) {
+    console.log(`Live calling ready (Exotel): ${tel.fromNumber} → stream at ${tel.publicBaseUrl}/api/exotel/stream`);
   } else {
-    console.log("Live calling: add Twilio SID, auth token, From number, then start ngrok on 8787.");
+    console.log("Live calling: add Exotel SID, API key/token, Exophone, then a public HTTPS URL.");
   }
 };
 

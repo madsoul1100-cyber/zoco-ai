@@ -2,7 +2,7 @@ import { WebSocket, WebSocketServer } from "ws";
 import { currentUser, skipLoginAllowed } from "../auth.js";
 import { spokenForTts } from "../languages.js";
 import { getAiSettings } from "../store.js";
-import { applyPronunciations } from "./pronunciation.js";
+import { applyPronunciations, isStaleSarvamDictError } from "./pronunciation.js";
 import { mergedKeys, sarvamTtsLanguage } from "./providers.js";
 
 const SARVAM_TTS_STREAM = "wss://api.sarvam.ai/text-to-speech/ws";
@@ -108,67 +108,81 @@ export function mountTtsStream(server) {
       const language = sarvamTtsLanguage(message.language || "en-IN");
       const pace = clamp(message.pace, 0.5, 1.2, 0.95);
       const temperature = clamp(message.temperature, 0.01, 0.75, 0.42);
+      const pitch = clamp(message.pitch, -0.75, 0.75, 0);
+      let dictId = String(message.dictId || "").trim();
 
-      upstream = new WebSocket(
-        `${SARVAM_TTS_STREAM}?model=${encodeURIComponent(model)}&send_completion_event=true`,
-        { headers: { "Api-Subscription-Key": apiKey, "api-subscription-key": apiKey } }
-      );
+      const openUpstream = (activeDictId, allowDictRetry) => {
+        if (closed) return;
+        try {
+          upstream?.close();
+        } catch {
+          /* ignore */
+        }
+        upstream = new WebSocket(
+          `${SARVAM_TTS_STREAM}?model=${encodeURIComponent(model)}&send_completion_event=true`,
+          { headers: { "Api-Subscription-Key": apiKey, "api-subscription-key": apiKey } }
+        );
 
-      upstream.on("open", () => {
-        const config = {
-          model,
-          language_code: language,
-          speaker,
-          pace,
-          speech_sample_rate: 24000,
-          output_audio_codec: "mp3",
-          output_audio_bitrate: "128k",
-          min_buffer_size: 30,
-          max_chunk_length: 180,
-        };
-        if (model === "bulbul:v3") config.temperature = temperature;
-        else config.pitch = clamp(message.pitch, -0.75, 0.75, 0);
-        const dictId = String(message.dictId || "").trim();
-        if (dictId && model === "bulbul:v3") config.dict_id = dictId;
+        upstream.on("open", () => {
+          const config = {
+            model,
+            language_code: language,
+            speaker,
+            pace,
+            speech_sample_rate: 24000,
+            output_audio_codec: "mp3",
+            output_audio_bitrate: "128k",
+            min_buffer_size: 30,
+            max_chunk_length: 180,
+          };
+          if (model === "bulbul:v3") config.temperature = temperature;
+          else config.pitch = pitch;
+          if (activeDictId && model === "bulbul:v3") config.dict_id = activeDictId;
 
-        upstream.send(JSON.stringify({ type: "config", data: config }));
-        upstream.send(JSON.stringify({ type: "text", data: { text } }));
-        upstream.send(JSON.stringify({ type: "flush" }));
-      });
+          upstream.send(JSON.stringify({ type: "config", data: config }));
+          upstream.send(JSON.stringify({ type: "text", data: { text } }));
+          upstream.send(JSON.stringify({ type: "flush" }));
+        });
 
-      upstream.on("message", (data) => {
-        if (client.readyState !== WebSocket.OPEN) return;
-        const event = parseMessage(data);
-        if (!event) return;
-        if (event.type === "audio" && event.data?.audio) {
-          client.send(JSON.stringify({
-            type: "audio",
-            audio: event.data.audio,
-            contentType: event.data.content_type || "audio/mpeg",
-          }));
-          return;
-        }
-        if (event.type === "event" && event.data?.event_type === "final") {
-          client.send(JSON.stringify({ type: "done" }));
-          return;
-        }
-        if (event.type === "error") {
-          client.send(JSON.stringify({
-            type: "error",
-            error: event.data?.message || "Sarvam streaming TTS failed.",
-          }));
-        }
-      });
-      upstream.on("error", (error) => {
-        if (client.readyState === WebSocket.OPEN) {
-          client.send(JSON.stringify({ type: "error", error: error.message || "TTS socket failed." }));
-        }
-      });
-      upstream.on("close", () => {
-        if (client.readyState === WebSocket.OPEN) {
-          client.send(JSON.stringify({ type: "done" }));
-        }
-      });
+        upstream.on("message", (data) => {
+          if (client.readyState !== WebSocket.OPEN) return;
+          const event = parseMessage(data);
+          if (!event) return;
+          if (event.type === "audio" && event.data?.audio) {
+            client.send(JSON.stringify({
+              type: "audio",
+              audio: event.data.audio,
+              contentType: event.data.content_type || "audio/mpeg",
+            }));
+            return;
+          }
+          if (event.type === "event" && event.data?.event_type === "final") {
+            client.send(JSON.stringify({ type: "done" }));
+            return;
+          }
+          if (event.type === "error") {
+            const errMsg = event.data?.message || "Sarvam streaming TTS failed.";
+            if (allowDictRetry && activeDictId && isStaleSarvamDictError(errMsg)) {
+              console.warn(`Sarvam streaming dict ${activeDictId} not found — retrying without dict`);
+              openUpstream("", false);
+              return;
+            }
+            client.send(JSON.stringify({ type: "error", error: errMsg }));
+          }
+        });
+        upstream.on("error", (error) => {
+          if (client.readyState === WebSocket.OPEN) {
+            client.send(JSON.stringify({ type: "error", error: error.message || "TTS socket failed." }));
+          }
+        });
+        upstream.on("close", () => {
+          if (client.readyState === WebSocket.OPEN) {
+            client.send(JSON.stringify({ type: "done" }));
+          }
+        });
+      };
+
+      openUpstream(dictId, true);
     });
 
     client.on("close", () => {

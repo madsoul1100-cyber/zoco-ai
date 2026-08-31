@@ -2,7 +2,7 @@ import { createHmac, randomBytes, scrypt as scryptCb, timingSafeEqual } from "no
 import { promisify } from "node:util";
 import { col, fromDoc, toDoc } from "./infra/mongo.js";
 import { normalizePhone } from "./phone.js";
-import { checkVerifySms, resolveTelephony, sendSms, sendVerifySms } from "./telephony/twilio.js";
+import { checkVerifySms, resolveTelephony, sendSms, sendVerifySms } from "./telephony/index.js";
 
 const scrypt = promisify(scryptCb);
 const COOKIE = "zoco_session";
@@ -294,8 +294,8 @@ export async function sendPhoneOtp(rawPhone) {
     );
     return { sent: true, phone };
   }
-  if (!tel.twilioReady) {
-    throw new Error("Phone login needs Twilio SMS. Add Twilio credentials, then try again.");
+  if (!tel.exotelReady && !tel.twilioReady) {
+    throw new Error("Phone login needs SMS. Exotel voice is configured separately; use Google sign-in for now.");
   }
   const code = String(Math.floor(100000 + Math.random() * 900000));
   await col("phoneOtps").replaceOne(
@@ -351,7 +351,7 @@ export async function authMethods() {
     email: true,
     google: Boolean(googleClientId && googleSecret),
     googleClientId: googleClientId && googleSecret ? googleClientId : "",
-    phone: Boolean(tel.twilioReady || process.env.TWILIO_VERIFY_SERVICE_SID),
+    phone: Boolean(tel.exotelReady || tel.twilioReady || process.env.TWILIO_VERIFY_SERVICE_SID),
     skip: skipLoginAllowed(),
   };
 }

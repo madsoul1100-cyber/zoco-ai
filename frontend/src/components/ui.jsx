@@ -122,11 +122,15 @@ export function MessageTimeline({ messages = [], liveText, heardText, pendingUse
   }, [messages, liveText, heardText, pendingUserText]);
 
   const lastUser = [...messages].reverse().find((m) => m.role === "user");
+  const lastAssistant = [...messages].reverse().find((m) => m.role === "assistant");
   const pending = String(pendingUserText || "").trim();
   const showPending = pending && pending !== String(lastUser?.text || "").trim();
   const hearing = String(heardText || "").trim();
   // Keep the live caption even while a pending line exists if hearing is newer/different.
-  const showHearing = hearing && hearing !== pending;
+  const showHearing = hearing && hearing !== pending && hearing !== String(lastUser?.text || "").trim();
+  const live = String(liveText || "").trim();
+  // Avoid duplicate bubble: final assistant message + same live caption.
+  const showLive = live && live !== String(lastAssistant?.text || "").trim();
 
   return (
     <div className="timeline" ref={boxRef}>
@@ -149,10 +153,10 @@ export function MessageTimeline({ messages = [], liveText, heardText, pendingUse
           {hearing}
         </div>
       ) : null}
-      {liveText ? (
+      {showLive ? (
         <div className="bubble assistant live-speak">
           <b>assistant · speaking</b>
-          {liveText}
+          {live}
         </div>
       ) : null}
     </div>

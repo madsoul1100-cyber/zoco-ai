@@ -7,9 +7,9 @@ const SARVAM_REALTIME = "wss://api.sarvam.ai/speech-to-text-realtime/ws";
 
 function silenceMsFromEagerness(eagerness) {
   const value = Number(eagerness);
-  if (!Number.isFinite(value)) return 550;
-  // Longer floor so mid-phrase pauses don't drop the start of an utterance.
-  return Math.max(450, Math.min(1100, Math.round((11 - value) * 85)));
+  if (!Number.isFinite(value)) return 750;
+  // Longer floor so mid-phrase pauses don't drop half the sentence.
+  return Math.max(700, Math.min(1400, Math.round((11 - value) * 100)));
 }
 
 function buildSarvamUrl({ language = "auto", eagerness = 7 } = {}) {

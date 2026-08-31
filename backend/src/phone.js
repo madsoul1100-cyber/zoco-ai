@@ -15,8 +15,10 @@ export function defaultTelephony() {
     provider: "browser",
     fromNumber: "",
     accountSid: "",
-    authToken: "",
+    apiKey: "",
+    apiToken: "",
     publicBaseUrl: "",
+    exotelReady: false,
     twilioReady: false,
     updatedAt: null,
   };

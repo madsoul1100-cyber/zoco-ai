@@ -205,7 +205,7 @@ export default function Login({ setup, methods: initialMethods, onReady }) {
                 disabled={busy || !methods.phone}
                 onClick={() => {
                   if (!methods.phone) {
-                    setError("Phone login needs Twilio SMS connected.");
+                    setError("Phone login needs SMS configured.");
                     return;
                   }
                   setError("");
@@ -217,7 +217,7 @@ export default function Login({ setup, methods: initialMethods, onReady }) {
                 Continue with phone
               </button>
               {!methods.phone ? (
-                <p className="login-hint">Phone needs Twilio SMS. Connect Twilio in Settings, then try again.</p>
+                <p className="login-hint">Phone login needs SMS OTP. Use Google sign-in for now, or configure TWILIO_VERIFY_SERVICE_SID in env.</p>
               ) : null}
 
               <div className="login-or"><span>or</span></div>
