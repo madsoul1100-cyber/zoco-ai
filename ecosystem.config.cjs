@@ -38,9 +38,9 @@ module.exports = {
     },
     {
       name: "zoco-pipecat",
-      cwd: "./pipecat",
-      script: "uv",
-      args: "run bot.py",
+      cwd: ".",
+      script: "bash",
+      args: "scripts/run-pipecat.sh",
       interpreter: "none",
       instances: 1,
       autorestart: true,
