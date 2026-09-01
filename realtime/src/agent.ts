@@ -167,11 +167,11 @@ export default defineAgent({
       if (!switchLanguages) return;
       if (next !== ttsLanguage) {
         ttsLanguage = next;
-        tts.updateOptions({ language: next });
+        tts.updateOptions({ language: next as never });
       }
       if (next !== sttLanguage) {
         sttLanguage = next;
-        stt.updateOptions({ language: next });
+        stt.updateOptions({ language: next as never });
       }
     }
 
