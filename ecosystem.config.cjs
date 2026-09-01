@@ -24,5 +24,30 @@ module.exports = {
         NODE_ENV: "production",
       },
     },
+    {
+      name: "zoco-worker",
+      cwd: "./realtime",
+      script: "npm",
+      args: "run start",
+      instances: 1,
+      autorestart: true,
+      max_restarts: 20,
+      env: {
+        NODE_ENV: "production",
+      },
+    },
+    {
+      name: "zoco-pipecat",
+      cwd: "./pipecat",
+      script: "uv",
+      args: "run bot.py",
+      interpreter: "none",
+      instances: 1,
+      autorestart: true,
+      max_restarts: 20,
+      env: {
+        NODE_ENV: "production",
+      },
+    },
   ],
 };

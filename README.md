@@ -15,7 +15,11 @@ npm run dev
 - App: [http://localhost:5173](http://localhost:5173)
 - API: [http://localhost:8787](http://localhost:8787)
 
-Optional LLM: set `OPENAI_API_KEY` before `npm run dev`. Without it, Zoco uses a local conversation engine so the prototype still works.
+Optional LLM: set `OPENROUTER_API_KEY` before `npm run dev`. Without it, chat still uses the local conversation engine.
+
+Voice tests use **LiveKit** when `LIVEKIT_URL`, `LIVEKIT_API_KEY`, and `LIVEKIT_API_SECRET` are set. `npm run dev` starts the API, studio, and LiveKit worker together.
+
+Optional **Pipecat** stack uses [Pipecat Cloud REST](https://docs.pipecat.ai/api-reference/pipecat-cloud/rest-reference/overview): set `PIPECAT_CLOUD_PUBLIC_KEY` and `PIPECAT_CLOUD_AGENT_NAME` (private key optional for agent/secrets management). Local `PIPECAT_URL` + `npm run dev:pipecat` is a fallback. In Agent Studio, set **Voice stack** to Pipecat.
 
 ## What this prototype already does
 

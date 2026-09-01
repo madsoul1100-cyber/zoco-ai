@@ -3,6 +3,8 @@ dist/
 .DS_Store
 .env
 .env.local
+.venv/
+pipecat/.venv/
 data/calls/
 data/agents/
 data/recordings/
@@ -12,3 +14,5 @@ data/telephony.json
 *.wav
 *.mp3
 npm-debug.log*
+__pycache__/
+*.pyc

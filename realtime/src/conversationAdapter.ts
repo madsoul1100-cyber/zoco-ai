@@ -1,5 +1,5 @@
 import { randomUUID } from "node:crypto";
-import { fetchSnapshot, postEvent, postTurn, type SessionSnapshot, type TurnReply } from "./zocoBridge.js";
+import { fetchSnapshot, postEvent, postTool, type SessionSnapshot, type ToolReply } from "./zocoBridge.js";
 
 export function eventId(prefix: string) {
   return `${prefix}_${randomUUID().slice(0, 12)}`;
@@ -9,38 +9,20 @@ export async function loadSession(callId: string): Promise<SessionSnapshot> {
   return fetchSnapshot(callId);
 }
 
-export async function handleUserTurn(callId: string, userText: string, sttLanguage?: string | null): Promise<TurnReply> {
-  const trimmed = String(userText || "").trim();
-  if (!trimmed) return { text: "", endCall: false, disposition: null };
+export async function callTool(callId: string, name: string, args: Record<string, unknown> = {}): Promise<ToolReply> {
+  return postTool(callId, { eventId: eventId("tool"), name, args });
+}
+
+export async function recordTranscript(callId: string, role: "user" | "assistant" | "system", text: string, extra: Record<string, string> = {}) {
+  const trimmed = String(text || "").trim();
+  if (!trimmed) return;
   await postEvent(callId, {
-    eventId: eventId("usr"),
+    eventId: eventId(role === "user" ? "usr" : role === "assistant" ? "asst" : "sys"),
     type: "transcript",
-    role: "user",
+    role,
     text: trimmed,
+    ...extra,
   });
-  const reply = await postTurn(callId, {
-    eventId: eventId("turn"),
-    userText: trimmed,
-    sttLanguage: sttLanguage || null,
-  });
-  if (reply.text) {
-    await postEvent(callId, {
-      eventId: eventId("asst"),
-      type: "transcript",
-      role: "assistant",
-      text: reply.text,
-      disposition: reply.disposition || undefined,
-    });
-  }
-  if (reply.endCall && reply.disposition) {
-    await postEvent(callId, {
-      eventId: eventId("disp"),
-      type: "disposition",
-      disposition: reply.disposition,
-      reason: "agent_end",
-    });
-  }
-  return reply;
 }
 
 export async function recordMetric(callId: string, name: string, value: number | string, extra: Record<string, number | string> = {}) {
@@ -56,6 +38,15 @@ export async function recordStatus(callId: string, status: string, reason?: stri
     eventId: eventId("status"),
     type: "status",
     status,
+    reason,
+  });
+}
+
+export async function recordDisposition(callId: string, disposition: string, reason?: string) {
+  await postEvent(callId, {
+    eventId: eventId("disp"),
+    type: "disposition",
+    disposition,
     reason,
   });
 }

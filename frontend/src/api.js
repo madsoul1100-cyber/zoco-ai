@@ -150,6 +150,14 @@ export const api = {
   saveAi: (payload) => request("/api/ai", { method: "PUT", body: JSON.stringify(payload) }),
   translate: (payload) => request("/api/translate", { method: "POST", body: JSON.stringify(payload) }),
   speak: (payload) => request("/api/tts", { method: "POST", body: JSON.stringify(payload) }),
+  livekitStatus: () => request("/api/livekit/status"),
+  startLiveKitSession: (id) => request(`/api/livekit/calls/${id}/session`, { method: "POST", body: "{}" }),
+  pipecatStatus: () => request("/api/pipecat/status"),
+  startPipecatSession: (id) => request(`/api/pipecat/calls/${id}/session`, { method: "POST", body: "{}" }),
+  stopPipecatSession: (id) => request(`/api/pipecat/calls/${id}/session`, { method: "DELETE" }),
+  pipecatCloudAgents: (query = "") => request(`/api/pipecat/cloud/agents${query}`),
+  pipecatCloudAgent: (name) => request(`/api/pipecat/cloud/agents/${encodeURIComponent(name)}`),
+  pipecatCloudStart: (payload) => request("/api/pipecat/cloud/start", { method: "POST", body: JSON.stringify(payload || {}) }),
   transcribe: async (blob, language = "en-IN") => {
     const data = new FormData();
     data.append("audio", blob, "speech.webm");
