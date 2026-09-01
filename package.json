@@ -14,15 +14,12 @@
     "dev:all": "npm run dev",
     "start": "npm run start --prefix backend",
     "clean:disk": "bash scripts/clean-disk.sh",
-    "pm2:start": "npm run build --prefix frontend && pm2 startOrReload ecosystem.config.cjs --update-env && pm2 save",
+    "pm2:start": "npm install --prefix backend && npm install --prefix frontend && npm install --prefix realtime && npm run build --prefix frontend && npm run build --prefix realtime && pm2 startOrReload ecosystem.config.cjs --update-env && pm2 save",
     "pm2:restart": "pm2 restart zoco-api zoco-web zoco-worker zoco-pipecat",
     "pm2:stop": "pm2 stop zoco-api zoco-web zoco-worker zoco-pipecat",
     "pm2:logs": "pm2 logs zoco-api zoco-web zoco-worker zoco-pipecat"
   },
   "devDependencies": {
     "concurrently": "^9.1.2"
-  },
-  "dependencies": {
-    "livekit-client": "^2.22.1"
   }
 }
