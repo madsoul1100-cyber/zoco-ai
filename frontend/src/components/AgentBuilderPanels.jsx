@@ -357,6 +357,9 @@ export function SettingsPanel({
     ? agent.llmModel
     : brainModels[0]?.id || "";
   const gender = voiceGender(catalog, agent);
+  const voiceRuntime = agent.voiceRuntime || "livekit";
+  const usesCartesiaVoice = voiceRuntime === "livekit" || voiceRuntime === "pipecat";
+  const usesLiveKitBrain = voiceRuntime === "livekit";
   const busyTranslate = translating || genderSyncing;
   const sarvamV3 = String(agent.ttsModel || "").includes("v3");
   const dictCount = pronunciationCount(settings.pronunciations);
@@ -486,6 +489,53 @@ export function SettingsPanel({
         </SettingRow>
 
         <h3>Speaking</h3>
+        <SettingRow
+          title="Voice stack"
+          hint={voiceRuntime === "pipecat"
+            ? "Deepgram hears the caller, your studio brain replies, Cartesia speaks. Uses Pipecat Cloud when keys are set."
+            : voiceRuntime === "personalized"
+              ? "Sarvam speech plus your OpenRouter or Sarvam brain. Chat uses the same model."
+              : "Deepgram hears the caller, Gemma replies, Cartesia speaks. Chat uses the same Gemma model."}
+        >
+          <select
+            className="input"
+            value={voiceRuntime}
+            onChange={(e) => onChange({ ...agent, voiceRuntime: e.target.value })}
+          >
+            <option value="livekit">LiveKit</option>
+            <option value="pipecat">Pipecat</option>
+            <option value="personalized">Personalized</option>
+          </select>
+        </SettingRow>
+        {usesCartesiaVoice ? (
+          <SettingRow
+            title="Speaker gender"
+            hint={gender === "male"
+              ? "Cartesia uses a male voice. Hindi uses masculine forms such as करूंगा."
+              : "Cartesia uses a female voice. Hindi uses feminine forms such as करूंगी."}
+          >
+            <select
+              className="input"
+              value={gender}
+              onChange={(e) => {
+                const nextGender = e.target.value;
+                const spec = catalog?.tts?.find((item) => item.id === "sarvam")
+                  || catalog?.tts?.find((item) => item.id === (agent.ttsProvider || "browser"));
+                const match = (spec?.voices || []).find((item) => item.gender === nextGender);
+                changeVoice({
+                  ttsProvider: spec?.id || agent.ttsProvider || "sarvam",
+                  ttsVoice: match?.id || (nextGender === "male" ? "shubh" : "priya"),
+                  ttsModel: match?.model || agent.ttsModel || "",
+                });
+              }}
+            >
+              <option value="female">Female</option>
+              <option value="male">Male</option>
+            </select>
+          </SettingRow>
+        ) : null}
+        {usesCartesiaVoice ? null : (
+        <>
         <SettingRow title="Voice engine" hint="Browser is free. Sarvam and OpenAI need a key in Settings.">
           <select
             className="input"
@@ -621,6 +671,8 @@ export function SettingsPanel({
             ) : null}
           </div>
         </SettingRow>
+        </>
+        )}
 
         <Modal
           open={dictOpen}
@@ -669,7 +721,15 @@ export function SettingsPanel({
         </Modal>
 
         <h3>Thinking & knowledge</h3>
-        <SettingRow title="AI brain" hint="Sarvam, Grok, OpenAI, and OpenRouter. Keys live in Settings.">
+        {usesLiveKitBrain ? (
+          <SettingRow title="AI brain" hint="Voice and chat both use Gemma 4 31B through LiveKit.">
+            <input className="input" value="Gemma 4 31B (LiveKit)" disabled />
+          </SettingRow>
+        ) : (
+        <>
+        <SettingRow title="AI brain" hint={voiceRuntime === "pipecat"
+          ? "Pipecat voice and chat both use this model. Keys live in Settings."
+          : "Sarvam, Grok, OpenAI, and OpenRouter. Keys live in Settings."}>
           <select
             className="input"
             value={brainKey(brainProvider, brainModel)}
@@ -686,6 +746,8 @@ export function SettingsPanel({
             ))}
           </select>
         </SettingRow>
+        </>
+        )}
         <SettingRow title="Warm transfer number" hint="Used by Transfer to human on live Twilio calls">
           <input className="input" value={agent.transferNumber || ""} onChange={(e) => onChange({ ...agent, transferNumber: e.target.value })} placeholder="+91…" />
         </SettingRow>

@@ -16,6 +16,8 @@ export default function Calling() {
   const [phoneForm, setPhoneForm] = useState({ workspaceName: "", workspacePhone: "" });
   const [contactForm, setContactForm] = useState({ name: "", phone: "", notes: "" });
   const [liveCall, setLiveCall] = useState(null);
+  const [livekit, setLivekit] = useState(null);
+  const [pipecat, setPipecat] = useState(null);
   const [exotelForm, setExotelForm] = useState({
     accountSid: "",
     apiKey: "",
@@ -32,16 +34,20 @@ export default function Calling() {
   });
 
   async function refresh() {
-    const [agentList, contactList, tel, queued] = await Promise.all([
+    const [agentList, contactList, tel, queued, kit, pipe] = await Promise.all([
       api.agents(),
       api.contacts(),
       api.telephony(),
       api.queue(),
+      api.livekitStatus().catch(() => null),
+      api.pipecatStatus().catch(() => null),
     ]);
     setAgents(agentList);
     setContacts(contactList);
     setTelephony(tel);
     setQueue(queued);
+    setLivekit(kit);
+    setPipecat(pipe);
     setPhoneForm({
       workspaceName: tel.workspaceName || "",
       workspacePhone: tel.workspacePhone || "",
@@ -161,7 +167,7 @@ export default function Calling() {
         await refresh();
         return;
       }
-      if (call.channel === "telephony" || call.exotelSid || call.twilioSid) {
+      if (call.channel === "telephony" || call.exotelSid || call.twilioSid || call.livekit?.roomName || call.pipecat?.sessionId) {
         setLiveCall(call);
         setNotice(`Ringing ${call.customer?.phone}. Answer the phone — the agent is on the line.`);
         return;
@@ -176,7 +182,7 @@ export default function Calling() {
     try {
       if (recall) {
         const next = await api.recall(call.id);
-        if (next.channel === "telephony" || next.exotelSid || next.twilioSid) {
+        if (next.channel === "telephony" || next.exotelSid || next.twilioSid || next.livekit?.roomName || next.pipecat?.sessionId) {
           setLiveCall(next);
           return;
         }
@@ -184,7 +190,7 @@ export default function Calling() {
         return;
       }
       const started = await api.startOutbound(call.id);
-      if (started.channel === "telephony" || started.exotelSid || started.twilioSid) {
+      if (started.channel === "telephony" || started.exotelSid || started.twilioSid || started.livekit?.roomName || started.pipecat?.sessionId) {
         setLiveCall(started);
         return;
       }
@@ -197,13 +203,16 @@ export default function Calling() {
   if (!telephony) return <p className="muted">Loading calling desk…</p>;
 
   const exotelReady = Boolean(telephony.exotelReady ?? telephony.twilioReady);
+  const livekitReady = Boolean(livekit?.sipReady);
+  const pipecatReady = Boolean(pipecat?.dialReady);
+  const lineReady = livekitReady || pipecatReady || exotelReady;
 
   return (
     <>
       <PageHeader
         title="Calling desk"
-        subtitle="Connect Exotel, then Call phone. The customer mobile rings and the Zoco agent talks on the line."
-        actions={<span className={`badge ${exotelReady ? "done" : "recall"}`}>{exotelReady ? "Live line ready" : "Exotel not connected"}</span>}
+        subtitle="LiveKit or Pipecat can run the voice agent. Connect a SIP trunk or Daily PSTN for phone calls, or keep Exotel as fallback."
+        actions={<span className={`badge ${lineReady ? "done" : "recall"}`}>{livekitReady ? "LiveKit SIP ready" : pipecatReady ? "Pipecat Daily ready" : exotelReady ? "Exotel ready" : "Phone line not connected"}</span>}
       />
 
       {error ? <p className="error">{error}</p> : null}
@@ -211,8 +220,8 @@ export default function Calling() {
 
       <ol className="steps">
         <li><b>Register</b> the mobile that should ring (your phone for a test).</li>
-        <li><b>Connect Exotel</b> — Account SID, API key, token, Exophone, and a public HTTPS URL.</li>
-        <li><b>Call phone</b> — Exotel connects the customer and streams audio to Zoco.</li>
+        <li><b>LiveKit / Pipecat</b> — API keys are already in <code>.env</code>. Add a SIP trunk or Daily PSTN for phone, then run the matching worker.</li>
+        <li><b>Call phone</b> — LiveKit SIP or Pipecat Daily rings the customer when configured; otherwise Exotel is used.</li>
       </ol>
 
       {liveCall ? (
@@ -245,6 +254,38 @@ export default function Calling() {
             <p className="muted">On file: {telephony.workspacePhone}</p>
           ) : null}
         </form>
+
+        <section className="card grid">
+          <h3>LiveKit voice</h3>
+          <p className="muted">
+            {livekit?.ready
+              ? "Studio voice tests run on LiveKit. Phone calls use LiveKit SIP when a trunk ID is set."
+              : "Add LIVEKIT_URL, LIVEKIT_API_KEY, and LIVEKIT_API_SECRET to .env, then start the worker."}
+          </p>
+          <p className="muted">
+            Agent: {livekit?.agentName || "zoco-voice"}
+            {livekit?.sipReady ? " · SIP trunk connected" : " · SIP trunk not set (browser tests still work)"}
+          </p>
+          <span className={`badge ${livekit?.ready ? "done" : "recall"}`}>{livekit?.ready ? "Worker path ready" : "Not configured"}</span>
+        </section>
+
+        <section className="card grid">
+          <h3>Pipecat voice</h3>
+          <p className="muted">
+            {pipecat?.ready
+              ? pipecat.mode === "cloud"
+                ? "Studio tests and Daily PSTN start through Pipecat Cloud REST."
+                : "Studio voice tests run on the local Pipecat worker when Voice stack is Pipecat."
+              : "Set PIPECAT_CLOUD_PUBLIC_KEY (and PIPECAT_CLOUD_AGENT_NAME), or PIPECAT_URL and npm run dev:pipecat."}
+          </p>
+          <p className="muted">
+            {pipecat?.mode === "cloud" ? "Pipecat Cloud" : "Local worker"}
+            {pipecat?.agentName ? ` · ${pipecat.agentName}` : ""}
+            {pipecat?.transport ? ` · ${pipecat.transport}` : ""}
+            {pipecat?.dialReady ? " · Daily PSTN connected" : " · Daily PSTN not set (browser tests still work)"}
+          </p>
+          <span className={`badge ${pipecat?.ready ? "done" : "recall"}`}>{pipecat?.ready ? (pipecat.mode === "cloud" ? "Cloud REST ready" : "Worker path ready") : "Not configured"}</span>
+        </section>
 
         <form className="card grid" onSubmit={saveExotel}>
           <h3>Exotel live line</h3>

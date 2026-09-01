@@ -25,9 +25,11 @@ import { loadEnv } from "./loadEnv.js";
 import { normalizePhone } from "./phone.js";
 import { authMiddleware, mountAuthRoutes } from "./routes/auth.js";
 import { mountLiveKitRoutes } from "./routes/livekit.js";
+import { mountPipecatRoutes } from "./routes/pipecat.js";
 import { mountProductRoutes } from "./routes/product.js";
 import { mountWidgetRoutes } from "./routes/widget.js";
-import { publicLiveKitStatus } from "./services/livekit.js";
+import { persistVoiceRuntime, publicLiveKitStatus } from "./services/livekit.js";
+import { publicPipecatStatus } from "./services/pipecat.js";
 import {
   attachTurn,
   handleCallJob,
@@ -93,6 +95,7 @@ mountAuthRoutes(app);
 mountWidgetRoutes(app);
 mountProductRoutes(app, { upload });
 mountLiveKitRoutes(app);
+mountPipecatRoutes(app);
 
 app.get("/api/health", async (_req, res) => {
   const settings = await getAiSettings();
@@ -109,6 +112,7 @@ app.get("/api/health", async (_req, res) => {
     telephony: publicTelephony(telephony),
     infra: await infraHealth(),
     livekit: publicLiveKitStatus(),
+    pipecat: publicPipecatStatus(),
   });
 });
 
@@ -305,6 +309,7 @@ app.post("/api/agents", async (req, res) => {
     ttsProvider: body.ttsProvider || "browser",
     ttsModel: body.ttsModel || "",
     ttsVoice: body.ttsVoice || "",
+    voiceRuntime: persistVoiceRuntime(body.voiceRuntime, "livekit"),
     transferNumber: body.transferNumber || "",
     knowledgeBaseIds: Array.isArray(body.knowledgeBaseIds) ? body.knowledgeBaseIds : [],
     category: body.category || "",
@@ -336,6 +341,9 @@ app.put("/api/agents/:id", async (req, res) => {
   if (!existing) return res.status(404).json({ error: "Agent not found" });
   const agent = { ...existing, ...req.body, id: existing.id, updatedAt: new Date().toISOString() };
   if (req.body?.language) agent.language = normalizeLanguage(req.body.language);
+  if (req.body?.voiceRuntime) {
+    agent.voiceRuntime = persistVoiceRuntime(req.body.voiceRuntime, existing.voiceRuntime || "livekit");
+  }
   const saved = await saveAgent(agent);
   const bumped = Number(saved.version || 1) !== Number(existing.version || 1);
   if (bumped || req.body?.commitVersion) await commitAgentVersion(saved);

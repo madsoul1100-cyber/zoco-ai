@@ -2,6 +2,64 @@ import { useEffect, useState } from "react";
 import { api } from "../api.js";
 import { PageHeader } from "../components/ui.jsx";
 
+function LiveKitStatus() {
+  const [status, setStatus] = useState(null);
+  useEffect(() => {
+    api.livekitStatus().then(setStatus).catch(() => setStatus({ ready: false }));
+  }, []);
+  if (!status) return null;
+  return (
+    <section className="card grid" style={{ marginBottom: 16 }}>
+      <h3>LiveKit</h3>
+      <p className="muted">
+        Voice tests and phone calls run through LiveKit Cloud. Keys live in <code>.env</code> — they are not stored in Settings.
+      </p>
+      <div className="row">
+        <span className={`badge ${status.configured ? "done" : "recall"}`}>{status.configured ? "Keys set" : "Keys missing"}</span>
+        <span className={`badge ${status.ready ? "done" : "recall"}`}>{status.ready ? "Ready" : "Not ready"}</span>
+        <span className={`badge ${status.sipReady ? "done" : "recall"}`}>{status.sipReady ? "SIP ready" : "SIP not set"}</span>
+      </div>
+      <p className="muted">Agent name: {status.agentName || "zoco-voice"}{status.url ? ` · ${status.url}` : ""}</p>
+    </section>
+  );
+}
+
+function PipecatStatus() {
+  const [status, setStatus] = useState(null);
+  const [cloudAgent, setCloudAgent] = useState(null);
+  useEffect(() => {
+    api.pipecatStatus().then(async (next) => {
+      setStatus(next);
+      const name = next.cloud?.agentName || next.agentName;
+      if (next.cloud?.privateReady && name) {
+        setCloudAgent(await api.pipecatCloudAgent(name).catch(() => null));
+      }
+    }).catch(() => setStatus({ ready: false }));
+  }, []);
+  if (!status) return null;
+  return (
+    <section className="card grid" style={{ marginBottom: 16 }}>
+      <h3>Pipecat</h3>
+      <p className="muted">
+        Optional voice stack via Pipecat Cloud REST, same pattern as LiveKit Cloud. Public/private keys live in <code>.env</code>. Local <code>npm run dev:pipecat</code> is a fallback.
+      </p>
+      <div className="row">
+        <span className={`badge ${status.configured ? "done" : "recall"}`}>{status.cloud?.configured ? "Cloud keys set" : status.configured ? "Local worker set" : "Not set"}</span>
+        <span className={`badge ${status.ready ? "done" : "recall"}`}>{status.ready ? "Ready" : "Not ready"}</span>
+        <span className={`badge ${status.dialReady ? "done" : "recall"}`}>{status.dialReady ? "Daily PSTN ready" : "Daily PSTN not set"}</span>
+        {status.cloud?.privateReady ? <span className="badge done">Private API ready</span> : null}
+      </div>
+      <p className="muted">
+        {status.mode === "cloud" ? "Pipecat Cloud" : status.mode === "local" ? "Local worker" : "Off"}
+        {status.agentName ? ` · agent ${status.agentName}` : ""}
+        {status.transport ? ` · ${status.transport}` : ""}
+        {status.url ? ` · ${status.url}` : ""}
+        {cloudAgent ? ` · ${cloudAgent.ready ? "deployed" : "not ready"} (${cloudAgent.activeSessionCount ?? 0} live)` : ""}
+      </p>
+    </section>
+  );
+}
+
 export default function Settings() {
   const [rules, setRules] = useState(null);
   const [telephony, setTelephony] = useState(null);
@@ -87,6 +145,9 @@ export default function Settings() {
         </div>
         <button className="btn" type="submit">{saved === "ai" ? "Saved" : "Save AI providers"}</button>
       </form>
+
+      <LiveKitStatus />
+      <PipecatStatus />
 
       <form className="grid split" onSubmit={saveRules}>
         <section className="card grid">

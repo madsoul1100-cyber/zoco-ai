@@ -1,38 +1,26 @@
-# LiveKit Priya Outbound Pilot
+# LiveKit voice worker
 
-Feature-flagged realtime phone path for the Priya MLC agent. Zoco remains the control plane; LiveKit Cloud handles media; the worker delegates conversation logic back to Zoco over an authenticated bridge.
+Zoco stores agents, campaigns, transcripts, and outcomes. LiveKit Cloud runs the full voice path:
 
-## Enable the pilot
+`mic → LiveKit room → Deepgram STT → Gemma LLM → Cartesia TTS → speaker`
 
-1. Copy LiveKit and bridge settings into `.env` from `.env.example`.
-2. Configure a Twilio SIP trunk and LiveKit outbound trunk (`LIVEKIT_SIP_OUTBOUND_TRUNK_ID`).
-3. Deploy the worker to LiveKit Cloud (agent name must match `LIVEKIT_AGENT_NAME`, default `zoco-priya-pilot`).
-4. Set:
+## Run locally
+
+Keys in the repo-root `.env`:
 
 ```bash
-LIVEKIT_PILOT_ENABLED=true
-LIVEKIT_PILOT_AGENT_ID=agt_priya_mlc_outbound
-LIVEKIT_BRIDGE_TOKEN=<shared-secret>
+LIVEKIT_ENABLED=true
+LIVEKIT_URL=wss://your-project.livekit.cloud
+LIVEKIT_API_KEY=...
+LIVEKIT_API_SECRET=...
+LIVEKIT_AGENT_NAME=zoco-voice
 ```
-
-5. Start services:
 
 ```bash
 npm run install:all
-npm run dev:all
+npm run dev
 ```
 
-Only calls for the configured Priya agent use LiveKit when `livekitReady()` is true. All other agents and failed LiveKit dispatches continue on the existing Twilio TwiML path.
+In Agent Studio, click **Test agent**. No Sarvam or OpenRouter keys are required for voice.
 
-## A/B comparison checklist
-
-Run the same scripted English/Hindi/Telugu cases on both paths and record:
-
-- Median and p95 user-stop → first agent audio
-- Barge-in correctness
-- Language switch accuracy
-- Outcome/disposition completion
-- Disconnect and failure rate
-- Per-call provider cost
-
-Rollback is `LIVEKIT_PILOT_ENABLED=false`.
+Phone calls use LiveKit SIP when `LIVEKIT_SIP_OUTBOUND_TRUNK_ID` is set. Otherwise outbound still falls back to Exotel.

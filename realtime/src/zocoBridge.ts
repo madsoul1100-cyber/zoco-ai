@@ -7,9 +7,21 @@ export type TurnReply = {
   model?: string | null;
 };
 
+export type ToolReply = {
+  ok: boolean;
+  result?: string;
+  endCall?: boolean;
+  disposition?: string | null;
+  transfer?: string | null;
+  say?: string;
+  duplicate?: boolean;
+};
+
 export type SessionSnapshot = {
   callId: string;
   greeting: string;
+  instructions?: string;
+  knowledge?: string;
   language: string;
   agent: {
     id: string;
@@ -18,7 +30,11 @@ export type SessionSnapshot = {
     ttsVoice?: string;
     ttsModel?: string;
     ttsProvider?: string;
+    transferNumber?: string;
     callSettings?: Record<string, unknown>;
+    voiceRuntime?: string;
+    gender?: "male" | "female" | string;
+    customTools?: Array<{ id?: string; name: string; description?: string }>;
   };
   llm: {
     provider: string;
@@ -42,10 +58,22 @@ export type SessionEventPayload = {
   duplicate?: boolean;
 };
 
+function isPlaceholder(value: string) {
+  const raw = String(value || "").trim();
+  return !raw || raw === "..." || /^<.*>$/.test(raw);
+}
+
+function resolvedBridgeToken() {
+  const raw = String(process.env.LIVEKIT_BRIDGE_TOKEN || "").trim();
+  if (!isPlaceholder(raw)) return raw;
+  const secret = String(process.env.LIVEKIT_API_SECRET || "").trim();
+  if (!secret) throw new Error("LIVEKIT_BRIDGE_TOKEN is not configured");
+  return `zoco-${secret.slice(0, 24)}`;
+}
+
 function bridgeConfig() {
   const baseUrl = String(process.env.ZOCO_BRIDGE_URL || process.env.PUBLIC_BASE_URL || "http://127.0.0.1:8787").replace(/\/$/, "");
-  const token = String(process.env.LIVEKIT_BRIDGE_TOKEN || "").trim();
-  if (!token) throw new Error("LIVEKIT_BRIDGE_TOKEN is not configured");
+  const token = resolvedBridgeToken();
   return { baseUrl, token };
 }
 
@@ -84,6 +112,24 @@ export async function postTurn(callId: string, payload: {
     throw new Error(data.error || `Turn failed (${response.status})`);
   }
   return data as TurnReply;
+}
+
+export async function postTool(callId: string, payload: {
+  eventId: string;
+  name: string;
+  args?: Record<string, unknown>;
+}): Promise<ToolReply> {
+  const { baseUrl, token } = bridgeConfig();
+  const response = await fetch(`${baseUrl}/api/livekit/sessions/${encodeURIComponent(callId)}/tools`, {
+    method: "POST",
+    headers: headers(token),
+    body: JSON.stringify(payload),
+  });
+  const data = await response.json().catch(() => ({}));
+  if (!response.ok) {
+    throw new Error(data.error || `Tool failed (${response.status})`);
+  }
+  return data as ToolReply;
 }
 
 export async function postEvent(callId: string, payload: SessionEventPayload): Promise<{ ok: boolean; duplicate?: boolean }> {

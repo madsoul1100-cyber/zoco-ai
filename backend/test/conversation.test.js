@@ -15,6 +15,7 @@ const agent = {
   id: "agt_test_priya",
   name: "Priya",
   language: "te-IN",
+  voiceRuntime: "personalized",
   callSettings: {
     switchLanguage: true,
     autoDetectLanguage: true,

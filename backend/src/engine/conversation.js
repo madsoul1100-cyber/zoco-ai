@@ -14,6 +14,7 @@ import {
 import { getAiSettings } from "../store.js";
 import { fallbackLlmConfig, llmHeaders, resolveLlmConfig, speakerGender } from "./providers.js";
 import { openAiTools, runToolCall } from "./tools.js";
+import { agentUsesLiveKit, livekitInferenceLlm } from "../services/livekit.js";
 
 const SLOT_PATTERNS = [
   { key: "name", re: /(?:i am|i'm|this is|my name is)\s+([A-Za-z][A-Za-z\s]{1,40})/i },
@@ -29,6 +30,18 @@ export { llmHeaders };
 
 export async function resolveLlm(agent) {
   const settings = await getAiSettings();
+  return resolveConversationLlm(agent, settings);
+}
+
+export async function resolveConversationLlm(agent, settings) {
+  if (agentUsesLiveKit(agent)) {
+    try {
+      const livekitLlm = await livekitInferenceLlm();
+      if (livekitLlm) return livekitLlm;
+    } catch (error) {
+      console.warn("LiveKit inference LLM unavailable:", error.message);
+    }
+  }
   return resolveLlmConfig(agent, settings);
 }
 
@@ -157,6 +170,52 @@ function languageLock(agent) {
   return `LANGUAGE LOCK for this turn: speak ${lang.label} only, in the ${lang.native} script. Keep any [END:...] tag in ASCII English. Do not reply in English unless the customer asked for English.`;
 }
 
+export function liveKitLanguageSwitchRule(agent = {}) {
+  const lang = getLanguage(agent?.language);
+  const settings = agent?.callSettings || {};
+  if (settings.switchLanguage === false) {
+    return `Stay in ${lang.label} for the whole call. Do not switch languages.`;
+  }
+  const allowed = Array.isArray(settings.allowedLanguages) && settings.allowedLanguages.length
+    ? settings.allowedLanguages
+    : ["te-IN", "hi-IN", "en-IN"];
+  const names = allowed.map((code) => getLanguage(code).label).join(", ");
+  return [
+    `LANGUAGE SWITCH (hard rule, overrides Language continuity): Start in ${lang.label}.`,
+    `Allowed languages: ${names}.`,
+    `If the caller says they do not understand, or asks to talk in English or Hindi — including "talk in English", "talk in Hindi", "please speak English", "हिंदी में बात करो", "ఇంగ్లీష్ లో మాట్లాడు" — switch on that same turn and stay there until they switch again.`,
+    `After switching away from Telugu, do not speak Telugu again until they ask.`,
+    `English: Latin letters only, natural Indian English. Hindi: Devanagari only. Telugu: Telugu script.`,
+    `Do not translate their English or Hindi request into Telugu. Reply in the language they asked for.`,
+    `Do not switch to English on short or garbled Latin STT such as "Hello?", "I graduate who", "who", or "No. No. No." while the call is in Hindi or Telugu. Stay in the active language and ask them to repeat.`,
+    `Do not call end_interaction or treat the caller as not_interested unless they clearly refuse the topic in the active language. "No no no" during overlap is not a hangup.`,
+  ].join(" ");
+}
+
+export function liveKitSpeechLengthRule() {
+  return "SPOKEN LENGTH (hard rule): Speak one short sentence, then one question. Two sentences only if needed. Never a paragraph. Never stop after two or three words such as हाँ जी, ठीक है, or Namaskaram. Finish every sentence you start.";
+}
+
+export function liveKitInstructions({ agent, knowledge = "", slots = {}, customer = {} }) {
+  const mergedSlots = {
+    ...(slots || {}),
+    customer_name: customer?.name || slots?.customer_name || "",
+    phone: customer?.phone || slots?.phone || "",
+  };
+  const messages = buildModelMessages({
+    agent: { ...agent, _voiceStream: true, _liveKitSession: true },
+    history: [],
+    userText: "The live call has started. Use the configured greeting, then wait for the customer.",
+    slots: mergedSlots,
+    knowledge,
+  });
+  const who = [customer?.name, customer?.phone].filter(Boolean).join(" · ");
+  const header = who ? `Customer on this call: ${who}.` : "";
+  return [header, ...messages.filter((item) => item.role === "system").map((item) => item.content), liveKitLanguageSwitchRule(agent), liveKitSpeechLengthRule()]
+    .filter(Boolean)
+    .join("\n\n");
+}
+
 export function buildModelMessages({ agent, history, userText, slots, knowledge }) {
   const rich = Array.isArray(agent?.instructionSections) && agent.instructionSections.length > 0;
   const voiceStream = Boolean(agent?._voiceStream);
@@ -173,9 +232,10 @@ Hard speech rules from the Instructions (never break these):
 - Never mark wrong_person unless they clearly say a different person answered or the number is wrong.
 - If they live outside the constituency or say this is not for them, end as not_interested — do not keep pitching.
 - After a language switch, do not repeat the introduction. Briefly confirm the language, explain the Graduate MLC purpose, and ask permission.
-- When the active language is Hindi, speak only Devanagari Hindi until another language is requested.
+- When the active language is Hindi, speak only Devanagari Hindi until they clearly ask for English or Telugu.
 - In Hindi, keep normal Indian English terms in Latin script: Graduate MLC, voter registration, Form 18, quality, WhatsApp. Never transliterate them as ग्रेजुएट, एमएलसी, वोटर, रजिस्ट्रेशन, फॉर्म, क्वालिटी.
 - When the active language is English, speak natural Indian English only until another language is requested.
+- A few English words, Hello, who, or No No No is STT noise — stay in the active language, ask them to repeat, and do not hang up.
 - Never invent DOB, KYC, bank, or address-collection questions — stay on Graduate MLC awareness only.`
       : `You work for the business in the use case. Sound like a real agency person, not a generic assistant. One or two short sentences. Never more than 25 words.`,
     languageInstruction(agent),
@@ -196,7 +256,9 @@ Hard speech rules from the Instructions (never break these):
     knowledge ? `Use this knowledge base only when the customer asks something factual. Never read it out as a list. Knowledge:\n${knowledge}` : "",
     slots && Object.keys(slots).length ? `Known details: ${JSON.stringify(slots)}` : "",
     voiceStream
-      ? "VOICE STREAM: At most TWO short spoken sentences. Complete your point in this turn — never stop at only okay / ठीक है / जी हाँ / हाँ / Namaskaram. After a language switch, confirm the language AND say why you called and ask for ~30 seconds in the SAME turn. If ending, close fully then [END:...]. If continuing, finish with one clear question."
+      ? agent._liveKitSession
+        ? "VOICE STREAM: One short spoken sentence, then one question. Two sentences only if needed. Never a paragraph. Never stop after two or three words. After a language switch, confirm the language AND say why you called in the SAME turn. If ending, close fully then [END:...]."
+        : "VOICE STREAM: At most TWO short spoken sentences. Complete your point in this turn — never stop at only okay / ठीक है / जी हाँ / हाँ / Namaskaram. After a language switch, confirm the language AND say why you called and ask for ~30 seconds in the SAME turn. If ending, close fully then [END:...]. If continuing, finish with one clear question."
       : "",
     voiceStream ? voiceObjectiveReminder(agent, history, slots) : "",
     `LISTEN FIRST (hard rule): The customer's latest message is the only thing you must answer on this turn. If they ask who you are, why you called, what this is about, what you want to say next, or ask to change language, answer that clearly before any script question (graduation year, Form 18, district, etc.). Never ignore their words to push the outbound pitch. Never invent that they agreed to something they did not say.`,
@@ -225,7 +287,9 @@ Hard speech rules from the Instructions (never break these):
   } else {
     const lang = getLanguage(agent?.language);
     const code = lang.code;
-    if (code === "hi-IN") {
+    if (agent._liveKitSession) {
+      messages.push({ role: "system", content: liveKitLanguageSwitchRule(agent) });
+    } else if (code === "hi-IN") {
       messages.push({
         role: "system",
         content:
@@ -606,26 +670,53 @@ export async function generateReply({ agent, call, userText, knowledge = "", kno
   if (intent) return { ...intent, slots, provider: "intent", model: null };
 
   const settings = await getAiSettings();
-  let llm = resolveLlmConfig(speaking, settings);
+  let llm = await resolveConversationLlm(speaking, settings);
 
   if (llm) {
     try {
-      const result = await completeWithTools({
-        agent: speaking,
-        call,
-        history,
-        userText,
-        slots,
-        llm,
-        knowledge,
-        knowledgeFn,
-      });
-      return {
-        ...normalizeEndDisposition(guardEarlyHangup(result, call, userText), speaking, userText),
-        slots,
-        provider: llm.provider,
-        model: llm.model,
-      };
+      if (llm.provider === "livekit") {
+        let full = "";
+        for await (const token of streamModelTokens({
+          agent: speaking,
+          history,
+          userText,
+          slots,
+          llm,
+          knowledge,
+        })) {
+          full += token;
+        }
+        if (full.trim()) {
+          return {
+            ...normalizeEndDisposition(
+              guardEarlyHangup(parseSpoken(full, speaking.language || call?.language), call, userText),
+              speaking,
+              userText
+            ),
+            slots,
+            provider: llm.provider,
+            model: llm.model,
+          };
+        }
+        throw new Error("LiveKit returned an empty reply");
+      } else {
+        const result = await completeWithTools({
+          agent: speaking,
+          call,
+          history,
+          userText,
+          slots,
+          llm,
+          knowledge,
+          knowledgeFn,
+        });
+        return {
+          ...normalizeEndDisposition(guardEarlyHangup(result, call, userText), speaking, userText),
+          slots,
+          provider: llm.provider,
+          model: llm.model,
+        };
+      }
     } catch (error) {
       console.warn(`${llm.provider} fallback:`, error.message);
       const backup = llm.provider === "openrouter" ? null : fallbackLlmConfig(settings);
@@ -1024,7 +1115,7 @@ export async function streamReply({ agent, call, userText, knowledge = "", onTok
   }
 
   const settings = await getAiSettings();
-  const llm = resolveLlmConfig(speaking, settings);
+  const llm = await resolveConversationLlm(speaking, settings);
 
   if (!llm) {
     const local = localReply({ agent: speaking, history, userText, slots });
@@ -1066,6 +1157,7 @@ export async function streamReply({ agent, call, userText, knowledge = "", onTok
     };
   } catch (error) {
     console.warn(`${llm.provider} stream fallback:`, error.message);
+    const backup = llm.provider === "livekit" ? fallbackLlmConfig(settings) : llm;
     try {
       const result = await completeWithTools({
         agent: speaking,
@@ -1073,10 +1165,11 @@ export async function streamReply({ agent, call, userText, knowledge = "", onTok
         history,
         userText,
         slots,
-        llm,
+        llm: backup || llm,
         knowledge,
       });
       if (result.text) onToken?.(result.text);
+      const used = backup || llm;
       return {
         ...normalizeEndDisposition(
           enforceLanguageReply(guardEarlyHangup(result, call, userText), speaking, userText),
@@ -1084,8 +1177,8 @@ export async function streamReply({ agent, call, userText, knowledge = "", onTok
           userText
         ),
         slots,
-        provider: llm.provider,
-        model: llm.model,
+        provider: used.provider,
+        model: used.model,
       };
     } catch (retryError) {
       const local = localReply({ agent: speaking, history, userText, slots });

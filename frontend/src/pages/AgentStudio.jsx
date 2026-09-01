@@ -11,6 +11,8 @@ import { callSettings } from "../lib/builder.js";
 import { languageLabel } from "../lib/languages.js";
 import { loadVoices, pickVoice, speakText, playAudio, playStreamingTts, stopAudio, stopAmbient, voicesForLang, spokenForTts, isNoiseTranscript, isLikelyAgentEcho, isMeaningfulBargeIn, isUrgentUserCommand, isLanguageSwitchCommand, stripModelControlText, normalizeVoiceTranscript, createSpeechQueue, pullSpeakable } from "../lib/voice.js";
 import { startStreamingStt } from "../lib/sttStream.js";
+import { connectLiveKitVoice } from "../lib/livekitVoice.js";
+import { connectPipecatVoice } from "../lib/pipecatVoice.js";
 
 function delay(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
@@ -153,6 +155,10 @@ export default function AgentStudio() {
   const [reviewNonce, setReviewNonce] = useState(0);
   const [translateTo, setTranslateTo] = useState("");
   const [translating, setTranslating] = useState(false);
+  const [livekit, setLivekit] = useState(null);
+  const [pipecat, setPipecat] = useState(null);
+  const livekitSessionRef = useRef(null);
+  const livekitPollRef = useRef(null);
 
   useEffect(() => {
     api.agent(id).then((next) => {
@@ -161,6 +167,8 @@ export default function AgentStudio() {
     }).catch((err) => setError(err.message));
     api.providers().then(setCatalog).catch(() => {});
     api.knowledge().then(setBases).catch(() => {});
+    api.livekitStatus().then(setLivekit).catch(() => setLivekit({ ready: false }));
+    api.pipecatStatus().then(setPipecat).catch(() => setPipecat({ ready: false }));
     loadVoices().then((list) => {
       setAllVoices(list);
     });
@@ -173,6 +181,7 @@ export default function AgentStudio() {
       speakAbortRef.current = true;
       speechQueueRef.current?.clear();
       void (async () => {
+        await stopLiveKitSession();
         await stopMic();
         if (finalizeAbandonedVoice) {
           await api.outcome(activeCall.id, {
@@ -241,16 +250,230 @@ export default function AgentStudio() {
       return next;
     } catch (err) {
       setError(err.message);
+      return null;
     } finally {
       setSaving(false);
     }
+  }
+
+  function studioPayload({ bumpVersion = false } = {}) {
+    const sections = resolveInstructionSections(agent);
+    const compiled = compileInstructions(sections);
+    return {
+      ...agent,
+      voice: voiceName || agent.voice,
+      status: agent.status || "draft",
+      ...(bumpVersion
+        ? { version: (Number(agent.version) || 1) + 1, commitVersion: true }
+        : {}),
+      instructionSections: sections,
+      instructions: compiled,
+      persona: compiled,
+      callSettings: callSettings(agent),
+      greetings: {
+        ...(agent.greetings || {}),
+        [agent.language || "en-IN"]: agent.greeting,
+      },
+    };
+  }
+
+  async function persistStudioAgent({ bumpVersion = false } = {}) {
+    return saveAgent(studioPayload({ bumpVersion }));
   }
 
   function isLive(current = callRef.current) {
     return current && ["in_progress", "ringing"].includes(current.status);
   }
 
+  function agentVoiceRuntime() {
+    return String(agent?.voiceRuntime || "livekit").toLowerCase();
+  }
+
+  function liveKitVoiceReady() {
+    if (agentVoiceRuntime() !== "livekit") return false;
+    return Boolean(livekit?.ready && livekit?.enabled !== false);
+  }
+
+  function pipecatVoiceReady() {
+    if (agentVoiceRuntime() !== "pipecat") return false;
+    return Boolean(pipecat?.ready && pipecat?.enabled !== false);
+  }
+
+  function pipelineVoiceReady() {
+    return liveKitVoiceReady() || pipecatVoiceReady();
+  }
+
+  function voiceStackLabel() {
+    if (pipecatVoiceReady()) return "Pipecat";
+    if (liveKitVoiceReady()) return "LiveKit";
+    return "Personalized";
+  }
+
+  async function stopLiveKitSession() {
+    clearInterval(livekitPollRef.current);
+    livekitPollRef.current = null;
+    const session = livekitSessionRef.current;
+    livekitSessionRef.current = null;
+    if (session?.disconnect) await session.disconnect().catch(() => {});
+    if (session?.callId && session?.sessionId) {
+      await api.stopPipecatSession(session.callId).catch(() => {});
+    }
+  }
+
+  function startLiveKitPoll(callId) {
+    clearInterval(livekitPollRef.current);
+    livekitPollRef.current = setInterval(async () => {
+      try {
+        const next = await api.call(callId);
+        callRef.current = next;
+        setCall(next);
+        const lastUser = [...(next.messages || [])].reverse().find((m) => m.role === "user");
+        const lastAssistant = [...(next.messages || [])].reverse().find((m) => m.role === "assistant");
+        const userText = String(lastUser?.text || "").trim();
+        const assistantText = String(lastAssistant?.text || "").trim();
+        if (userText) {
+          setPendingUserText((pending) => (pending && userText.includes(pending) ? "" : pending));
+          setHeardText((heard) => (heard && userText.includes(heard) ? "" : heard));
+        }
+        if (assistantText) {
+          setLiveText((live) => (live && assistantText.includes(live) ? "" : live));
+        }
+        if (!isLive(next)) {
+          const closing = livekitSessionRef.current;
+          clearInterval(livekitPollRef.current);
+          livekitPollRef.current = null;
+          if (closing?.runtime === "pipecat") {
+            await new Promise((resolve) => setTimeout(resolve, 2500));
+          }
+          await stopLiveKitSession();
+          setPhase("idle");
+        }
+      } catch {
+        /* ignore poll errors */
+      }
+    }, 400);
+  }
+
+  async function goLiveLiveKit(existing) {
+    setError("");
+    setLiveText("");
+    setHeardText("");
+    setPendingUserText("");
+    setMode("voice");
+    modeRef.current = "voice";
+    wantListenRef.current = false;
+    stopListening();
+    await stopLiveKitSession();
+    callRef.current = existing;
+    setCall(existing);
+    setPhase("connecting");
+    const sessionInfo = await api.startLiveKitSession(existing.id);
+    const connected = await connectLiveKitVoice({
+      url: sessionInfo.url,
+      token: sessionInfo.token,
+      onTranscript: ({ text, isFinal, role }) => {
+        if (role === "user") {
+          setHeardText(text);
+          if (isFinal) setPendingUserText(text);
+        } else {
+          setLiveText(text);
+        }
+      },
+      onSpeaking: (speaking) => {
+        if (isLive()) setPhase(speaking ? "speaking" : "listening");
+      },
+      onDisconnected: () => {
+        setPhase("idle");
+      },
+    });
+    livekitSessionRef.current = connected;
+    startLiveKitPoll(existing.id);
+    setPhase((current) => (current === "connecting" ? "listening" : current));
+  }
+
+  async function goLivePipecat(existing) {
+    setError("");
+    setLiveText("");
+    setHeardText("");
+    setPendingUserText("");
+    setMode("voice");
+    modeRef.current = "voice";
+    wantListenRef.current = false;
+    stopListening();
+    await stopLiveKitSession();
+    callRef.current = existing;
+    setCall(existing);
+    setPhase("connecting");
+    const sessionInfo = await api.startPipecatSession(existing.id);
+    const connected = await connectPipecatVoice({
+      startUrl: sessionInfo.startUrl,
+      dailyRoom: sessionInfo.dailyRoom,
+      dailyToken: sessionInfo.dailyToken,
+      iceConfig: sessionInfo.iceConfig,
+      transport: sessionInfo.transport || "webrtc",
+      callId: existing.id,
+      agentId: agent?.id,
+      enableDefaultIceServers: sessionInfo.enableDefaultIceServers !== false,
+      onTranscript: ({ text, isFinal, role }) => {
+        if (role === "user") {
+          setHeardText(text);
+          if (isFinal) setPendingUserText(text);
+        } else {
+          setLiveText(text);
+        }
+      },
+      onSpeaking: (speaking) => {
+        if (isLive()) setPhase(speaking ? "speaking" : "listening");
+      },
+      onDisconnected: () => {
+        setPhase("idle");
+      },
+    });
+    livekitSessionRef.current = {
+      ...connected,
+      callId: existing.id,
+      sessionId: sessionInfo.sessionId || "",
+      runtime: "pipecat",
+    };
+    startLiveKitPoll(existing.id);
+    setPhase((current) => (current === "connecting" ? "listening" : current));
+  }
+
   async function goLive(existing) {
+    if (snapshot(agent) !== savedSnap) {
+      const saved = await persistStudioAgent();
+      if (!saved) {
+        setPhase("idle");
+        return;
+      }
+    }
+    if (agentVoiceRuntime() === "pipecat") {
+      if (!pipecatVoiceReady()) {
+        setError("Pipecat is not ready. Set PIPECAT_CLOUD_PUBLIC_KEY in .env, or PIPECAT_URL and run `npm run dev:pipecat`.");
+        setPhase("idle");
+        return;
+      }
+      try {
+        await goLivePipecat(existing);
+        return;
+      } catch (err) {
+        setError(err.message);
+        setPhase("idle");
+        return;
+      }
+    }
+    if (liveKitVoiceReady()) {
+      try {
+        await goLiveLiveKit(existing);
+        return;
+      } catch (err) {
+        if (!/personalized/i.test(String(err.message || ""))) {
+          setError(err.message);
+          setPhase("idle");
+          return;
+        }
+      }
+    }
     setError("");
     setLiveText("");
     setHeardText("");
@@ -270,12 +493,10 @@ export default function AgentStudio() {
     setCall(connected);
     const greeting =
       [...connected.messages].reverse().find((m) => m.role === "assistant")?.text || agent.greeting;
-    // Seed echo filter with full greeting so speaker bleed is ignored, but allow barge-in.
     lastSpokenRef.current = String(greeting || "").trim();
     greetingProtectRef.current = false;
     wantListenRef.current = true;
     startPersistentListen();
-    // Short settle so STT is live before TTS starts — greeting is interruptible.
     ignoreUntilRef.current = Date.now() + 250;
     await speak(greeting);
     if (!userBargeOpenRef.current) {
@@ -288,7 +509,7 @@ export default function AgentStudio() {
   }
 
   useEffect(() => {
-    if (!agent || !presetCallId || launchedRef.current) return;
+    if (!agent || !presetCallId || launchedRef.current || !livekit || !pipecat) return;
     launchedRef.current = true;
     (async () => {
       try {
@@ -300,7 +521,7 @@ export default function AgentStudio() {
         launchedRef.current = false;
       }
     })();
-  }, [agent, presetCallId]);
+  }, [agent, presetCallId, livekit, pipecat]);
 
   async function startSession(channel, firstMessage) {
     setError("");
@@ -311,6 +532,10 @@ export default function AgentStudio() {
     modeRef.current = channel;
     wantListenRef.current = false;
     stopListening();
+    if (snapshot(agent) !== savedSnap) {
+      const saved = await persistStudioAgent();
+      if (!saved) return;
+    }
     const defaults = Object.fromEntries(
       (agent?.inputVariables || []).filter((item) => item?.key).map((item) => [item.key, item.defaultValue || ""])
     );
@@ -553,6 +778,14 @@ export default function AgentStudio() {
     clearTimeout(coalesceTimerRef.current);
     clearNudgeTimer();
     nudgeIndexRef.current = 0;
+    if (modeRef.current === "voice" && livekitSessionRef.current) {
+      sendingRef.current = false;
+      setDraft("");
+      setPendingUserText("");
+      setHeardText("");
+      setPhase("listening");
+      return;
+    }
     // Keep streaming STT alive during think/speak so barge-in hears the full interrupt.
     if (modeRef.current !== "voice" || !streamSttRef.current) {
       stopListening();
@@ -765,6 +998,7 @@ export default function AgentStudio() {
     speechQueueRef.current?.clear();
     window.speechSynthesis?.cancel();
     stopAudio();
+    await stopLiveKitSession();
     const next = await api.outcome(current.id, { status, disposition, reason });
     callRef.current = next;
     setCall(next);
@@ -877,6 +1111,7 @@ export default function AgentStudio() {
     speakingRef.current = false;
     stopAudio();
     stopAmbient();
+    await stopLiveKitSession();
     const recordingDone = recordingDoneRef.current;
     if (recorder.current?.state === "recording") recorder.current.stop();
     if (recordingDone) await Promise.race([recordingDone, delay(15000)]);
@@ -1475,24 +1710,7 @@ export default function AgentStudio() {
   }
 
   async function finishUpdate() {
-    const sections = resolveInstructionSections(agent);
-    const compiled = compileInstructions(sections);
-    const payload = {
-      ...agent,
-      voice: voiceName || agent.voice,
-      version: (Number(agent.version) || 1) + 1,
-      status: agent.status || "draft",
-      commitVersion: true,
-      instructionSections: sections,
-      instructions: compiled,
-      persona: compiled,
-      callSettings: callSettings(agent),
-      greetings: {
-        ...(agent.greetings || {}),
-        [agent.language || "en-IN"]: agent.greeting,
-      },
-    };
-    await saveAgent(payload);
+    await persistStudioAgent({ bumpVersion: true });
   }
 
   async function translateGreeting(code) {
@@ -1532,6 +1750,7 @@ export default function AgentStudio() {
   const live = call && ["in_progress", "ringing"].includes(call.status);
   const phaseLabel = {
     idle: live ? "Mic is live — just speak" : "Voice idle",
+    connecting: "Connecting — wait for the greeting",
     speaking: "Agent speaking…",
     listening: "Listening — just talk",
     thinking: "Thinking…",
@@ -1543,10 +1762,10 @@ export default function AgentStudio() {
     <section className="live-test">
       {mode === "voice" && live ? (
         <div className="voice-stage compact">
-          {phase === "speaking" || phase === "listening" ? <div className="pulse" /> : null}
+          {phase === "speaking" || phase === "listening" || phase === "connecting" ? <div className="pulse" /> : null}
           <div>
             <strong>{phaseLabel}</strong>
-            <div className="muted">{languageLabel(call?.language || agent.language)}</div>
+            <div className="muted">{languageLabel(call?.language || agent.language)}{pipelineVoiceReady() ? ` · ${voiceStackLabel()}` : ""}</div>
           </div>
         </div>
       ) : null}
@@ -1557,7 +1776,7 @@ export default function AgentStudio() {
         <>
           <div className="live-test-meta">
             <StatusBadge status={call.status} disposition={call.disposition} />
-            <span className="muted">{languageLabel(call.language || agent.language)}</span>
+            <span className="muted">{languageLabel(call.language || agent.language)}{pipelineVoiceReady() ? ` · ${voiceStackLabel()}` : " · Personalized"}</span>
           </div>
           <MessageTimeline
             messages={call.messages}
@@ -1570,7 +1789,7 @@ export default function AgentStudio() {
               <input
                 className="input"
                 value={draft}
-                placeholder={mode === "voice" ? "Type if the mic misses you" : "Type a reply"}
+                placeholder={mode === "voice" ? (pipelineVoiceReady() ? `Speak into the mic — ${voiceStackLabel()} is listening` : "Type if the mic misses you") : "Type a reply"}
                 onChange={(e) => setDraft(e.target.value)}
                 onKeyDown={(e) => e.key === "Enter" && send()}
               />
@@ -1590,8 +1809,12 @@ export default function AgentStudio() {
           <h3>{mode === "voice" ? "Test the voice" : "Test the chat"}</h3>
           <p className="muted">
             {mode === "voice"
-              ? "Allow the microphone, then talk. Chrome or Edge works best."
-              : "Send a message and see how the agent replies."}
+              ? pipelineVoiceReady()
+                ? `Allow the microphone. ${voiceStackLabel()} handles speech, turn-taking, and the agent voice.`
+                : "Allow the microphone, then talk. Chrome or Edge works best."
+              : liveKitVoiceReady()
+                ? "Chat uses the same LiveKit Gemma replies as voice."
+                : "Send a message and see how the agent replies."}
           </p>
         </div>
       )}

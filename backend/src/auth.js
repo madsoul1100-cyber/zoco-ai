@@ -362,6 +362,10 @@ export async function deleteUser(id) {
 
 const OPEN = [
   /^\/api\/auth\//,
+  /^\/api\/livekit\/status$/,
+  /^\/api\/livekit\/sessions\//,
+  /^\/api\/pipecat\/status$/,
+  /^\/api\/pipecat\/sessions\//,
   /^\/webhooks\//,
   /^\/widget/,
   /^\/embed/,

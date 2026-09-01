@@ -3,7 +3,8 @@ import { recordTurn } from "../infra/events.js";
 import { enqueueDial, enqueueRecall, queueState } from "../infra/queue.js";
 import { countLiveCampaignCalls, getCall, getCallAgent, getCampaign, saveCall } from "../store.js";
 import { inCallingWindow, msUntilWindow } from "../engine/window.js";
-import { dispatchLiveKitOutboundCall, isPilotAgent, livekitReady } from "./livekit.js";
+import { agentUsesLiveKit, dispatchLiveKitOutboundCall, livekitSipReady } from "./livekit.js";
+import { agentUsesPipecat, dispatchPipecatOutboundCall, pipecatDialReady } from "./pipecat.js";
 import { placeExotelCall, resolveTelephony } from "../telephony/index.js";
 
 export async function attachTurn(call, message, source) {
@@ -52,7 +53,7 @@ async function dialExotelCall(call, agent) {
   return saveCall(call);
 }
 
-async function dialLiveKitPilotCall(call, agent) {
+async function dialLiveKitCall(call, agent) {
   const tel = await resolveTelephony();
   const result = await dispatchLiveKitOutboundCall(call, agent);
   call.channel = "telephony";
@@ -68,14 +69,65 @@ async function dialLiveKitPilotCall(call, agent) {
   await attachTurn(call, {
     id: `msg_${uuid().slice(0, 8)}`,
     role: "system",
-    text: `LiveKit pilot: ${tel.fromNumber} → ${call.customer?.phone} (${result.roomName})`,
+    text: `LiveKit: ${tel.fromNumber || "SIP"} → ${call.customer?.phone} (${result.roomName})`,
     timestamp: new Date().toISOString(),
     audioOffsetMs: null,
   }, "livekit");
   return saveCall(call);
 }
 
+async function dialPipecatCall(call, agent) {
+  const result = await dispatchPipecatOutboundCall(call, agent);
+  call.channel = "telephony";
+  call.runtime = result.runtime;
+  call.pipecat = {
+    sessionId: result.sessionId,
+    roomUrl: result.roomUrl,
+    channel: "telephony",
+  };
+  call.status = "ringing";
+  call.nudgeIndex = 0;
+  if (!call.startedAt) call.startedAt = new Date().toISOString();
+  await attachTurn(call, {
+    id: `msg_${uuid().slice(0, 8)}`,
+    role: "system",
+    text: `Pipecat: Daily PSTN → ${call.customer?.phone} (${result.sessionId || result.roomUrl || "started"})`,
+    timestamp: new Date().toISOString(),
+    audioOffsetMs: null,
+  }, "pipecat");
+  return saveCall(call);
+}
+
 export async function dialLiveCall(call) {
+  const agent = await getCallAgent(call);
+  if (agentUsesPipecat(agent) && pipecatDialReady()) {
+    try {
+      return await dialPipecatCall(call, agent);
+    } catch (error) {
+      console.warn("Pipecat Daily dial-out failed, falling back to Exotel:", error.message);
+      await attachTurn(call, {
+        id: `msg_${uuid().slice(0, 8)}`,
+        role: "system",
+        text: `Pipecat unavailable (${error.message}). Falling back to Exotel.`,
+        timestamp: new Date().toISOString(),
+        audioOffsetMs: null,
+      }, "system");
+    }
+  }
+  if (agentUsesLiveKit(agent) && livekitSipReady()) {
+    try {
+      return await dialLiveKitCall(call, agent);
+    } catch (error) {
+      console.warn("LiveKit SIP dispatch failed, falling back to Exotel:", error.message);
+      await attachTurn(call, {
+        id: `msg_${uuid().slice(0, 8)}`,
+        role: "system",
+        text: `LiveKit unavailable (${error.message}). Falling back to Exotel.`,
+        timestamp: new Date().toISOString(),
+        audioOffsetMs: null,
+      }, "system");
+    }
+  }
   const tel = await resolveTelephony();
   if (!tel.exotelReady) {
     const missing = [
@@ -86,21 +138,6 @@ export async function dialLiveCall(call) {
       !tel.publicBaseUrl && "public webhook URL (HTTPS, e.g. ngrok on 8787)",
     ].filter(Boolean);
     throw new Error(`Live phone calling is not ready. Add: ${missing.join(", ")}`);
-  }
-  const agent = await getCallAgent(call);
-  if (isPilotAgent(agent?.id) && livekitReady()) {
-    try {
-      return await dialLiveKitPilotCall(call, agent);
-    } catch (error) {
-      console.warn("LiveKit pilot dispatch failed, falling back to Exotel:", error.message);
-      await attachTurn(call, {
-        id: `msg_${uuid().slice(0, 8)}`,
-        role: "system",
-        text: `LiveKit pilot unavailable (${error.message}). Falling back to Exotel.`,
-        timestamp: new Date().toISOString(),
-        audioOffsetMs: null,
-      }, "system");
-    }
   }
   return dialExotelCall(call, agent);
 }
@@ -145,6 +182,7 @@ export async function performRecall(previousId) {
     twilioSid: null,
     exotelSid: null,
     livekit: null,
+    pipecat: null,
     runtime: null,
     parentCallId: previous.id,
     createdAt: now,
@@ -177,7 +215,7 @@ export async function handleCallJob(job) {
     if (["completed", "busy", "no_answer", "failed", "dropped"].includes(call.status) && !call.recall?.needed) {
       return;
     }
-    if (call.twilioSid || call.livekit?.roomName || call.exotelSid) return;
+    if (call.twilioSid || call.livekit?.roomName || call.exotelSid || call.pipecat?.sessionId) return;
     if (call.campaignId) {
       const campaign = await getCampaign(call.campaignId);
       if (!campaign || campaign.status === "paused") return;
