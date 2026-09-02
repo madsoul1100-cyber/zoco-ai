@@ -7,6 +7,10 @@ from pathlib import Path
 from dotenv import load_dotenv
 
 from pipecat.audio.vad.silero import SileroVADAnalyzer
+try:
+    from pipecat.audio.vad.vad_analyzer import VADParams
+except ImportError:
+    VADParams = None
 from pipecat.frames.frames import (
     BotStartedSpeakingFrame,
     BotStoppedSpeakingFrame,
@@ -142,7 +146,6 @@ async def run_bot(transport: BaseTransport, runner_args: RunnerArguments):
     spoken = speech_language(language)
     agent = snapshot.get("agent") or {}
     gender = "male" if agent.get("gender") == "male" else "female"
-    switch_languages = agent.get("callSettings", {}).get("switchLanguage") is not False
     llm_cfg = snapshot.get("llm") or {}
 
     await record_status(call_id, "in_progress", "agent_connected")
@@ -168,7 +171,12 @@ async def run_bot(transport: BaseTransport, runner_args: RunnerArguments):
         api_key=deepgram_key or os.getenv("DEEPGRAM_API_KEY"),
         settings=DeepgramSTTService.Settings(
             model=os.getenv("PIPECAT_STT_MODEL", "nova-3"),
-            language="multi" if switch_languages else spoken,
+            language=spoken,
+            interim_results=True,
+            endpointing=300,
+            utterance_end_ms=1200,
+            punctuate=True,
+            smart_format=True,
         ),
     )
     tts = CartesiaTTSService(
@@ -282,9 +290,20 @@ async def run_bot(transport: BaseTransport, runner_args: RunnerArguments):
         tools.append(custom_tool)
 
     context = LLMContext(tools=tools)
+    try:
+        vad = SileroVADAnalyzer(
+            params=VADParams(
+                confidence=0.7,
+                start_secs=0.12,
+                stop_secs=0.2,
+                min_volume=0.6,
+            )
+        ) if VADParams else SileroVADAnalyzer()
+    except TypeError:
+        vad = SileroVADAnalyzer()
     aggregators = LLMContextAggregatorPair(
         context,
-        user_params=LLMUserAggregatorParams(vad_analyzer=SileroVADAnalyzer()),
+        user_params=LLMUserAggregatorParams(vad_analyzer=vad),
     )
     user_aggregator = aggregators.user() if hasattr(aggregators, "user") else aggregators[0]
     assistant_aggregator = aggregators.assistant() if hasattr(aggregators, "assistant") else aggregators[1]

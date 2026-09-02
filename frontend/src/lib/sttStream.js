@@ -88,7 +88,7 @@ export async function startStreamingStt({
     }
   }
   const source = audioCtx.createMediaStreamSource(stream);
-  const processor = audioCtx.createScriptProcessor(4096, 1, 1);
+  const processor = audioCtx.createScriptProcessor(2048, 1, 1);
   const mute = audioCtx.createGain();
   mute.gain.value = 0;
   source.connect(processor);

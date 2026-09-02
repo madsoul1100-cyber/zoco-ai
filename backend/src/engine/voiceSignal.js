@@ -107,7 +107,10 @@ export function rmsFromDb(db = -50) {
 }
 
 export function silenceMsFromEagerness(eagerness = 7) {
-  return Math.max(800, 400 + (11 - Number(eagerness || 7)) * 100);
+  const value = Number(eagerness);
+  const n = Number.isFinite(value) ? value : 7;
+  // Eager 9 ≈ 280ms, default 8 ≈ 320ms, cautious 4 ≈ 520ms. Never wait a full second.
+  return Math.max(280, Math.min(650, 180 + (11 - n) * 50));
 }
 
 export function nudgeDelayMs(agent) {

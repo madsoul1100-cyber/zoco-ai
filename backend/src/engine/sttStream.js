@@ -2,15 +2,9 @@ import { WebSocketServer, WebSocket } from "ws";
 import { currentUser, skipLoginAllowed } from "../auth.js";
 import { getAiSettings } from "../store.js";
 import { mergedKeys, sarvamTtsLanguage } from "./providers.js";
+import { silenceMsFromEagerness } from "./voiceSignal.js";
 
 const SARVAM_REALTIME = "wss://api.sarvam.ai/speech-to-text-realtime/ws";
-
-function silenceMsFromEagerness(eagerness) {
-  const value = Number(eagerness);
-  if (!Number.isFinite(value)) return 750;
-  // Longer floor so mid-phrase pauses don't drop half the sentence.
-  return Math.max(700, Math.min(1400, Math.round((11 - value) * 100)));
-}
 
 function buildSarvamUrl({ language = "auto", eagerness = 7 } = {}) {
   const params = new URLSearchParams({
@@ -28,7 +22,7 @@ function buildSarvamUrl({ language = "auto", eagerness = 7 } = {}) {
     // Reject room noise and distant voices; close-mic speech still clears this.
     threshold: "0.36",
     silence_duration_ms: String(silenceMsFromEagerness(eagerness)),
-    min_speech_duration_ms: "180",
+    min_speech_duration_ms: "120",
   });
   return `${SARVAM_REALTIME}?${params.toString()}`;
 }

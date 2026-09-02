@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { detectSpeechLanguage, looksLikeSttNoise } from "../src/speechLanguage.js";
+import { detectSpeechLanguage, isLikelyAgentEcho, looksLikeSttNoise } from "../src/speechLanguage.js";
 
 test("Hindi request and Devanagari pin speech to Hindi", () => {
   assert.equal(detectSpeechLanguage("आपके हिंदी में बात कर सकते हो?", "te"), "hi");
@@ -30,4 +30,20 @@ test("a real English sentence can still switch from Hindi", () => {
     detectSpeechLanguage("please tell me about this because I do not understand the process", "hi"),
     "en"
   );
+});
+
+test("short English STT fragments are treated as noise on English calls", () => {
+  assert.equal(looksLikeSttNoise("Aankhen", "en"), true);
+  assert.equal(looksLikeSttNoise("you are not", "en"), true);
+  assert.equal(looksLikeSttNoise("I am saying any", "en"), true);
+  assert.equal(looksLikeSttNoise("yes", "en"), false);
+  assert.equal(looksLikeSttNoise("I want the weekend batch please", "en"), false);
+});
+
+test("agent greeting echo is ignored, including CarePoint Hindi bleed", () => {
+  const greeting =
+    "नमस्ते, क्या मैं Ravi जी से बात कर रही हूँ? मैं CarePoint Clinic से Meera हूँ। आपके appointment के बारे में कॉल किया है, क्या एक मिनट है?";
+  assert.equal(isLikelyAgentEcho("मैं केयर प्वाइंट", greeting), true);
+  assert.equal(isLikelyAgentEcho("CarePoint Clinic", greeting), true);
+  assert.equal(isLikelyAgentEcho("हाँ, बताइए appointment कब है", greeting), false);
 });

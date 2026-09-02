@@ -300,3 +300,11 @@ export function mergeOutputVars(agent, extras = MLC_OUTPUT_VARS) {
   const added = extras.filter((row) => row?.key && !seen.has(row.key));
   return added.length ? [...current, ...added] : current;
 }
+
+export function sectionsFromPack(pack, titles, prefix = "sec") {
+  return (titles || Object.keys(pack || {})).map((title, index) => ({
+    id: `${prefix}_${String(index + 1).padStart(2, "0")}`,
+    title,
+    body: pack?.[title] || "",
+  }));
+}

@@ -13,6 +13,8 @@
     "dev:pipecat": "bash scripts/run-pipecat.sh",
     "dev:all": "npm run dev",
     "start": "npm run start --prefix backend",
+    "seed:priya": "npm run seed:priya --prefix backend",
+    "seed:showcase": "npm run seed:showcase --prefix backend",
     "clean:disk": "bash scripts/clean-disk.sh",
     "pm2:start": "npm install --prefix backend && npm install --prefix frontend && npm install --prefix realtime && npm run build --prefix frontend && npm run build --prefix realtime && pm2 startOrReload ecosystem.config.cjs --update-env && pm2 save",
     "pm2:restart": "pm2 restart zoco-api zoco-web zoco-worker zoco-pipecat",

@@ -8,6 +8,7 @@
     "start": "node src/server.js",
     "seed": "node src/seed.js",
     "seed:priya": "node scripts/seedPriyaMlc.js",
+    "seed:showcase": "node scripts/seedShowcaseAgents.js",
     "test": "node --test test/*.test.js"
   },
   "dependencies": {

@@ -6,6 +6,7 @@ import {
   followCustomerLanguage,
   guardEarlyHangup,
   intentDrivenReply,
+  isMlcCampaignAgent,
   parseSpoken,
   streamReply,
 } from "../src/engine/conversation.js";
@@ -57,7 +58,7 @@ test("not-graduate is not misclassified as out-of-area", () => {
   assert.equal(intent.notGraduate, true);
   assert.equal(intent.outOfArea, false);
 
-  const result = intentDrivenReply({ language: "hi-IN" }, text);
+  const result = intentDrivenReply({ ...agent, language: "hi-IN" }, text);
   assert.equal(result.disposition, "not_interested");
   assert.match(result.text, /Graduate MLC registration/);
   assert.doesNotMatch(result.text, /क्षेत्र/);
@@ -268,4 +269,21 @@ test("lone yes or Form 18 does not lock English", () => {
   const call2 = { language: "te-IN" };
   followCustomerLanguage(call2, agent, "Form 18");
   assert.equal(call2.languageLocked, undefined);
+});
+
+test("clinic agent is not treated as the MLC campaign", () => {
+  assert.equal(isMlcCampaignAgent({ id: "agt_meera_clinic_booking", name: "Meera - Clinic booking agent" }), false);
+  assert.equal(isMlcCampaignAgent(agent), true);
+});
+
+test("non-MLC agent does not hang up a not-graduate line with MLC copy", () => {
+  const clinic = {
+    id: "agt_meera_clinic_booking",
+    name: "Meera - Clinic booking agent",
+    language: "hi-IN",
+    useCase: "Clinic appointment booking",
+  };
+  const text = "I didn't study at all.";
+  assert.equal(detectCallerIntent(text).notGraduate, true);
+  assert.equal(intentDrivenReply(clinic, text), null);
 });

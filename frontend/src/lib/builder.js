@@ -4,7 +4,7 @@ export const DEFAULT_CALL_SETTINGS = {
   ttsTemperature: 0.42,
   temperature: 0.4,
   allowInterrupt: true,
-  eagerness: 7,
+  eagerness: 8,
   volumeThresholdDb: -48,
   backgroundSound: "off",
   backgroundVolume: 0.12,

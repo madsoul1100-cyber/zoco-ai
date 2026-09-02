@@ -672,10 +672,9 @@ export default function AgentStudio() {
   }
 
   function coalesceMs() {
-    // After an interrupt, give the caller time to finish the whole thought.
-    const base = userBargeOpenRef.current ? 1800 : 1400;
-    const eagerness = Number(callSettings(agentRef.current).eagerness || 7);
-    return Math.max(base, (11 - eagerness) * 200);
+    const base = userBargeOpenRef.current ? 480 : 320;
+    const eagerness = Number(callSettings(agentRef.current).eagerness || 8);
+    return Math.max(260, Math.min(650, base + (11 - eagerness) * 30));
   }
 
   function utteranceLooksIncomplete(text) {
@@ -696,9 +695,11 @@ export default function AgentStudio() {
       transcriptRef.current = "";
       return;
     }
-    if (utteranceLooksIncomplete(spoken) && coalesceExtendRef.current < 3) {
+    if (utteranceLooksIncomplete(spoken) && coalesceExtendRef.current < 1) {
       coalesceExtendRef.current += 1;
-      scheduleCoalesceFlush();
+      coalesceTimerRef.current = setTimeout(() => {
+        flushCoalescedUtterance();
+      }, 260);
       return;
     }
     coalesceExtendRef.current = 0;
@@ -898,7 +899,7 @@ export default function AgentStudio() {
               stopBargeWatch();
               speakingRef.current = false;
               if (!userBargeOpenRef.current) {
-                ignoreUntilRef.current = Date.now() + 550;
+                ignoreUntilRef.current = Date.now() + 140;
               }
               speechQueueRef.current = null;
             }
@@ -1316,7 +1317,7 @@ export default function AgentStudio() {
       speakingRef.current = false;
       // If user already barged in, don't deafen them again.
       if (!userBargeOpenRef.current) {
-        ignoreUntilRef.current = Date.now() + 550;
+        ignoreUntilRef.current = Date.now() + 140;
       }
     }
   }
@@ -1462,9 +1463,7 @@ export default function AgentStudio() {
     try {
       const session = await startStreamingStt({
         language: sttLanguage(),
-        // Cap eagerness so mid-phrase pauses aren't treated as end-of-turn.
-        // Lower eagerness → longer endpointing so full sentences are captured.
-        eagerness: 4,
+        eagerness: Number(callSettings(agentRef.current).eagerness || 8),
         mediaStream: micStreamRef.current,
         shouldSend: allowUplink,
         onReady: () => {
@@ -1477,6 +1476,17 @@ export default function AgentStudio() {
           if (Date.now() < ignoreUntilRef.current) return;
           resetBargeCandidate();
           clearNudgeTimer();
+        },
+        onVadEnd: () => {
+          if (!wantListenRef.current || asrGenerationRef.current !== loopId) return;
+          if (speakingRef.current || speechQueueRef.current?.busy) return;
+          if (sendingRef.current && !userBargeOpenRef.current) return;
+          const spoken = (transcriptRef.current || heardRef.current || "").trim();
+          if (spoken.length < 2) return;
+          clearTimeout(coalesceTimerRef.current);
+          coalesceTimerRef.current = setTimeout(() => {
+            flushCoalescedUtterance();
+          }, 120);
         },
         onPartial: (text) => {
           if (!wantListenRef.current || asrGenerationRef.current !== loopId) return;
@@ -1648,7 +1658,7 @@ export default function AgentStudio() {
             }
             void acceptUserSpeech(spoken, { immediate: true });
           }
-        }, Math.max(420, (11 - Number(agentRef.current?.callSettings?.eagerness || 7)) * 110));
+        }, Math.max(280, (11 - Number(agentRef.current?.callSettings?.eagerness || 8)) * 50));
       }
     };
 

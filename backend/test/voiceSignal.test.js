@@ -21,9 +21,11 @@ test("isMeaningfulBargeIn accepts real interrupts", () => {
   assert.equal(isMeaningfulBargeIn("Hindi please"), true);
 });
 
-test("silence window has a sensible minimum", () => {
-  assert.equal(silenceMsFromEagerness(7), 800);
+test("silence window stays in a human turn-taking range", () => {
+  assert.ok(silenceMsFromEagerness(8) <= 360);
+  assert.ok(silenceMsFromEagerness(9) <= 320);
   assert.ok(silenceMsFromEagerness(3) > silenceMsFromEagerness(9));
+  assert.ok(silenceMsFromEagerness(4) >= 280);
 });
 
 test("pcmRms detects louder buffers", () => {

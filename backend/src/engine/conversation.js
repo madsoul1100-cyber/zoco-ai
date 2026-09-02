@@ -45,6 +45,15 @@ export async function resolveConversationLlm(agent, settings) {
   return resolveLlmConfig(agent, settings);
 }
 
+export function isMlcCampaignAgent(agent = {}) {
+  const id = String(agent?.id || "");
+  const name = String(agent?.name || "");
+  const useCase = String(agent?.useCase || "");
+  if (id === "agt_priya_mlc_outbound" || /priya/i.test(id)) return true;
+  if (/graduate mlc|form 18/i.test(`${name} ${useCase}`)) return true;
+  return /priya/i.test(name) && !useCase;
+}
+
 function compiledAgentInstructions(agent) {
   const sections = Array.isArray(agent?.instructionSections) ? agent.instructionSections : [];
   if (sections.length) {
@@ -66,12 +75,17 @@ function voiceAgentInstructions(agent) {
   const sections = Array.isArray(agent?.instructionSections) ? agent.instructionSections : [];
   if (!sections.length) return compiledAgentInstructions(agent).slice(0, 5500);
   const priorities = new Set([
+    "Role and approved boundary",
     "Priority on every caller turn",
     "Voice, emotion and spoken shape",
     "Language continuity",
     "Configured personalized greeting",
     "Opening interruption repair",
     "Objection handling",
+    "Booking flow",
+    "Reschedule and cancel",
+    "Registration completion",
+    "Job details and slot",
     "Speech normalization",
     "Repair",
     "Ending",
@@ -223,7 +237,8 @@ export function buildModelMessages({ agent, history, userText, slots, knowledge 
   const system = [
     `You are ${agent.name}, on a live phone call.`,
     rich
-      ? `Stay in character for this agent. Obey the Instructions section as the source of truth for role, flow, language, tools and endings.
+      ? (isMlcCampaignAgent(agent)
+        ? `Stay in character for this agent. Obey the Instructions section as the source of truth for role, flow, language, tools and endings.
 Hard speech rules from the Instructions (never break these):
 - Never say ధన్యవాదాలు. Use English "Thank you" only for genuine thanks, never for giving a name/district/year.
 - Always speak the English words "Form 18". Never say ఫారం, ఫార్మ్ or ఫార్మే.
@@ -237,6 +252,16 @@ Hard speech rules from the Instructions (never break these):
 - When the active language is English, speak natural Indian English only until another language is requested.
 - A few English words, Hello, who, or No No No is STT noise — stay in the active language, ask them to repeat, and do not hang up.
 - Never invent DOB, KYC, bank, or address-collection questions — stay on Graduate MLC awareness only.`
+        : `Stay in character for this agent. Obey the Instructions section as the source of truth for role, flow, language, tools and endings.
+Hard speech rules from the Instructions (never break these):
+- Default to one short spoken sentence; two only when needed before one question.
+- On refusal / not interested / wrong person / opt-out: acknowledge what they said, speak a short closing in the ACTIVE language, then end with the correct [END:...] tag.
+- Never mark wrong_person unless they clearly say a different person answered or the number is wrong.
+- After a language switch, do not repeat the introduction. Briefly confirm the language, say why you called, and ask one useful question in the SAME turn.
+- When the active language is Hindi, speak only Devanagari Hindi until they clearly ask for English or Telugu. Keep product terms like WhatsApp, OTP, slot, PIN in English.
+- When the active language is English, speak natural Indian English only until another language is requested.
+- A few English words, Hello, who, or No No No is STT noise — stay in the active language, ask them to repeat, and do not hang up.
+- Never invent facts, prices, slots, or document lists that are not in the instructions or knowledge.`)
       : `You work for the business in the use case. Sound like a real agency person, not a generic assistant. One or two short sentences. Never more than 25 words.`,
     languageInstruction(agent),
     `Use case: ${agent.useCase}. Goal: ${agent.successCriteria}.`,
@@ -261,7 +286,7 @@ Hard speech rules from the Instructions (never break these):
         : "VOICE STREAM: At most TWO short spoken sentences. Complete your point in this turn — never stop at only okay / ठीक है / जी हाँ / हाँ / Namaskaram. After a language switch, confirm the language AND say why you called and ask for ~30 seconds in the SAME turn. If ending, close fully then [END:...]. If continuing, finish with one clear question."
       : "",
     voiceStream ? voiceObjectiveReminder(agent, history, slots) : "",
-    `LISTEN FIRST (hard rule): The customer's latest message is the only thing you must answer on this turn. If they ask who you are, why you called, what this is about, what you want to say next, or ask to change language, answer that clearly before any script question (graduation year, Form 18, district, etc.). Never ignore their words to push the outbound pitch. Never invent that they agreed to something they did not say.`,
+    `LISTEN FIRST (hard rule): The customer's latest message is the only thing you must answer on this turn. If they ask who you are, why you called, what this is about, what you want to say next, or ask to change language, answer that clearly before any script question. Never ignore their words to push the outbound pitch. Never invent that they agreed to something they did not say.`,
     `COMPLETE THE TURN (hard rule): Do not leave a dangling acknowledgement. Every reply must either (1) fully close the call with the correct ending line + [END:...], or (2) deliver the next useful point and end with one question. Never say only “okay / ठीक है / धन्यवाद” and wait.`,
     `SOUND HUMAN (hard rule): Speak like a real person on a phone — warm, brief, conversational. Keep natural punctuation (?, !, commas, ।) so TTS can breathe and ask questions with real intonation. Avoid stiff IVR phrasing.`,
     `Reply with spoken words only.`,
@@ -482,6 +507,7 @@ function notGraduateClosing(language) {
 export function intentDrivenReply(agent, userText) {
   const intent = detectCallerIntent(userText);
   const lang = getLanguage(agent?.language).code;
+  const mlc = isMlcCampaignAgent(agent);
   if (intent.wrongPerson) {
     return {
       text: closingLineFor("wrong_person", lang),
@@ -503,21 +529,21 @@ export function intentDrivenReply(agent, userText) {
       disposition: "callback_requested",
     };
   }
-  if (intent.outOfArea) {
+  if (mlc && intent.outOfArea) {
     return {
       text: outOfAreaClosing(lang),
       endCall: true,
       disposition: "not_interested",
     };
   }
-  if (intent.notGraduate) {
+  if (mlc && intent.notGraduate) {
     return {
       text: notGraduateClosing(lang),
       endCall: true,
       disposition: "not_interested",
     };
   }
-  if (intent.notInterested) {
+  if (intent.notInterested && (mlc || (!intent.outOfArea && !intent.notGraduate))) {
     return {
       text: closingLineFor("not_interested", lang),
       endCall: true,
@@ -532,6 +558,7 @@ export function normalizeEndDisposition(parsed, agent, userText) {
   if (!parsed) return parsed;
   const intent = detectCallerIntent(userText);
   const lang = getLanguage(agent?.language).code;
+  const mlc = isMlcCampaignAgent(agent);
   let next = { ...parsed };
 
   if (intent.wrongPerson) {
@@ -542,11 +569,13 @@ export function normalizeEndDisposition(parsed, agent, userText) {
     };
   }
   if (
-    intent.outOfArea
-    || intent.notGraduate
-    || intent.notInterested
-    || intent.doNotCall
-    || intent.callbackRequested
+    mlc && (
+      intent.outOfArea
+      || intent.notGraduate
+      || intent.notInterested
+      || intent.doNotCall
+      || intent.callbackRequested
+    )
   ) {
     const disposition = intent.doNotCall
       ? "do_not_call"
@@ -559,6 +588,18 @@ export function normalizeEndDisposition(parsed, agent, userText) {
         : intent.notGraduate
           ? notGraduateClosing(lang)
           : closingLineFor(disposition, lang),
+      endCall: true,
+      disposition,
+    };
+  }
+  if (!mlc && (intent.doNotCall || intent.callbackRequested || (intent.notInterested && !intent.outOfArea && !intent.notGraduate))) {
+    const disposition = intent.doNotCall
+      ? "do_not_call"
+      : intent.callbackRequested
+        ? "callback_requested"
+        : "not_interested";
+    return {
+      text: closingLineFor(disposition, lang),
       endCall: true,
       disposition,
     };
@@ -820,6 +861,7 @@ async function completeWithTools({ agent, call, history, userText, slots, llm, k
 
 function enforceLanguageReply(parsed, agent, userText) {
   if (!parsed?.text) return parsed;
+  if (!isMlcCampaignAgent(agent)) return parsed;
   const requested = detectRequestedLanguage(userText);
   const lang = getLanguage(agent?.language).code;
   const text = String(parsed.text || "");
@@ -855,6 +897,8 @@ function cannedVoiceTurn({ agent, history, userText, slots }) {
   // Intent endings apply on any turn (not only the first reply).
   const intent = intentDrivenReply(agent, userText);
   if (intent) return intent;
+
+  if (!isMlcCampaignAgent(agent)) return null;
 
   // Deterministic language switch: no repeated greeting or awkward transliteration.
   const requestedLanguage = detectRequestedLanguage(text);

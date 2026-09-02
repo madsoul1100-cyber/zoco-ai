@@ -21,7 +21,7 @@ export async function connectLiveKitVoice({
   const room = new Room({
     adaptiveStream: true,
     dynacast: true,
-    webAudioMix: true,
+    webAudioMix: false,
     audioCaptureDefaults: {
       echoCancellation: true,
       noiseSuppression: true,
@@ -168,6 +168,7 @@ export async function connectLiveKitVoice({
     ]);
   }
 
+  await new Promise((resolve) => setTimeout(resolve, 350));
   await room.localParticipant.setMicrophoneEnabled(true);
 
   return {

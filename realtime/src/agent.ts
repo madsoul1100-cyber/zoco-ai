@@ -19,7 +19,7 @@ import {
   recordStatus,
   recordTranscript,
 } from "./conversationAdapter.js";
-import { detectSpeechLanguage, looksLikeSttNoise } from "./speechLanguage.js";
+import { detectSpeechLanguage, isLikelyAgentEcho, looksLikeSttNoise } from "./speechLanguage.js";
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 dotenv.config({ path: path.resolve(here, "../../.env") });
@@ -112,15 +112,25 @@ export default defineAgent({
       language: spokenLanguage === "multi" ? "en" : spokenLanguage,
       modelOptions: {
         speed: 1,
-        max_buffer_delay_ms: 80,
+        max_buffer_delay_ms: 40,
       },
     });
 
     const stt = new inference.STT({
       model: "deepgram/nova-3",
-      language: switchLanguages ? "multi" : spokenLanguage,
+      language: spokenLanguage === "multi" ? "en" : spokenLanguage,
       modelOptions: {
-        keyterm: ["Form 18", "Graduate MLC", "graduation", "हिंदी", "తెలుగు", "MLC", "Priya"],
+        keyterm: [
+          snapshot.agent?.name,
+          "WhatsApp",
+          "weekend",
+          "batch",
+          "English",
+          "Hindi",
+          "Telugu",
+          "Form 18",
+          "Priya",
+        ].filter(Boolean),
         punctuate: true,
         smart_format: true,
         filler_words: false,
@@ -135,21 +145,21 @@ export default defineAgent({
         model: "google/gemma-4-31b-it",
       }),
       tts,
-      aecWarmupDuration: 0,
+      aecWarmupDuration: 0.35,
       turnHandling: {
         turnDetection: new inference.TurnDetector(),
         interruption: {
           enabled: true,
-          minDuration: 180,
+          minDuration: 120,
           minWords: 1,
           resumeFalseInterruption: false,
           discardAudioIfUninterruptible: true,
-          backchannelBoundary: 300,
+          backchannelBoundary: 220,
         },
         endpointing: {
           mode: "dynamic",
-          minDelay: 400,
-          maxDelay: 1600,
+          minDelay: 250,
+          maxDelay: 900,
         },
         preemptiveGeneration: {
           enabled: true,
@@ -160,6 +170,8 @@ export default defineAgent({
     session.input.setAudioEnabled(false);
 
     let ending = false;
+    let lastSpoken = String(snapshot.greeting || "");
+    let listenAfter = 0;
     let ttsLanguage: "en" | "hi" | "te" = spokenLanguage === "multi" ? "en" : (spokenLanguage as "en" | "hi" | "te");
     let sttLanguage = switchLanguages ? "multi" : spokenLanguage;
 
@@ -180,6 +192,14 @@ export default defineAgent({
       if (fromText) return fromText;
       if (looksLikeSttNoise(text, ttsLanguage)) return null;
       return asSpeechLanguage(reported);
+    }
+
+    function shouldIgnoreUserAudio(text: string) {
+      const raw = String(text || "").trim();
+      if (!raw) return true;
+      if (Date.now() < listenAfter) return true;
+      if (isLikelyAgentEcho(raw, lastSpoken)) return true;
+      return false;
     }
 
     async function finish(disposition: string, reason: string) {
@@ -213,36 +233,52 @@ export default defineAgent({
     const agent = voice.Agent.create({
       instructions: [
         snapshot.instructions || `You are ${snapshot.agent.name}, on a live phone call. Keep replies short and natural.`,
+        `You are ${snapshot.agent.name}. You are the clinic / company voice assistant. The customer is never you. Never say you are the customer, never say "मैं Ravi बोल रहा हूँ" / "this is Ravi", and never answer as if you received the call.`,
         gender === "male"
           ? "You speak with a male voice. In Hindi and other gendered Indian languages use masculine first-person forms: करूंगा, रहा हूँ, गया. Never say करूंगी, रही, or गई."
           : "You speak with a female voice. In Hindi and other gendered Indian languages use feminine first-person forms: करूंगी, रही हूँ, गई. Never say करूंगा.",
         alreadyGreeted
           ? "The configured greeting has already been spoken. Do not repeat the introduction. Wait for the customer, then continue the call."
           : "Greet the customer using the configured greeting, then wait.",
+        "STT can arrive as short fragments (Aankhen, I am saying any, you are not). Those are not refusals. Ask them to repeat. Never call end_interaction unless they clearly say not interested, stop calling, goodbye, or that the flow is finished in a full sentence.",
       ]
         .filter(Boolean)
         .join("\n\n"),
       onUserTurnCompleted: async (_agentCtx, _chatCtx, newMessage) => {
         const text = itemText(newMessage);
+        if (shouldIgnoreUserAudio(text)) {
+          newMessage.content = [
+            "[Ignore: microphone heard the agent's own voice. Do not speak. Do not change identity. Wait for the real caller.]",
+          ];
+          return;
+        }
         const next = languageFromTurn(text);
         if (next) applySpeechLanguage(next);
         if (!looksLikeSttNoise(text, ttsLanguage)) return;
         await recordTranscript(callId, "user", text);
         newMessage.content = [
-          `[Unclear STT while the caller is speaking ${ttsLanguage === "hi" ? "Hindi" : ttsLanguage === "te" ? "Telugu" : "English"}. Stay in that language. Do not switch to English. Do not end the call. Do not assume they graduated or refused. Ask them to repeat in one short sentence.]`,
+          `[Unclear STT fragment: "${text}". Stay in ${ttsLanguage === "hi" ? "Hindi" : ttsLanguage === "te" ? "Telugu" : "English"}. Do not end the call. Do not assume they refused. Ask them to repeat in one short sentence.]`,
         ];
       },
       onEnter: async (agentCtx) => {
+        session.input.setAudioEnabled(false);
         try {
           if (snapshot.greeting) {
+            lastSpoken = snapshot.greeting;
+            listenAfter = Date.now() + 60_000;
             const greetStarted = Date.now();
-            const handle = agentCtx.session.say(snapshot.greeting, { allowInterruptions: true });
-            session.input.setAudioEnabled(true);
+            const handle = agentCtx.session.say(snapshot.greeting, { allowInterruptions: false });
             await recordTranscript(callId, "assistant", snapshot.greeting);
-            void handle.waitForPlayout().then(() => recordMetric(callId, "greeting_ms", Date.now() - greetStarted));
-            return;
+            try {
+              await handle.waitForPlayout();
+            } catch {
+              /* still unmute */
+            }
+            await recordMetric(callId, "greeting_ms", Date.now() - greetStarted);
+            await new Promise((resolve) => setTimeout(resolve, 400));
           }
         } finally {
+          listenAfter = Date.now() + 450;
           session.input.setAudioEnabled(true);
         }
       },
@@ -259,7 +295,7 @@ export default defineAgent({
         }),
         end_interaction: llm.tool({
           description:
-            "End the call only after the caller clearly refuses, asks to stop, or finishes the flow. Never use this for Hello, who, No no no, or other short STT noise. Always pass goodbye with that exact spoken line, then disposition.",
+            "End the call only after the caller clearly refuses, asks to stop, or finishes the flow. Never use this for Hello, who, No no no, Aankhen, you are not, I am saying any, or other short STT fragments. Always pass goodbye with that exact spoken line, then disposition.",
           parameters: z.object({
             goodbye: z.string().describe("The exact short closing line spoken to the caller before hangup"),
             disposition: z
@@ -299,6 +335,7 @@ export default defineAgent({
     session.on(voice.AgentSessionEventTypes.UserInputTranscribed, (event) => {
       if (ending || !event.isFinal) return;
       const text = String(event.transcript || "");
+      if (shouldIgnoreUserAudio(text)) return;
       const next = languageFromTurn(text, event.language || undefined);
       if (next) applySpeechLanguage(next);
     });
@@ -309,8 +346,10 @@ export default defineAgent({
       const role = item.role === "user" ? "user" : item.role === "assistant" ? "assistant" : "";
       const text = itemText(item);
       if (!role || !text) return;
-      if (text.includes("[Unclear STT")) return;
+      if (text.includes("[Unclear STT") || text.includes("[Ignore:")) return;
+      if (role === "assistant") lastSpoken = text;
       if (role === "user") {
+        if (shouldIgnoreUserAudio(text)) return;
         const next = languageFromTurn(text);
         if (next) applySpeechLanguage(next);
       }
