@@ -199,12 +199,18 @@ export async function handleSessionTool(callId, { eventId, name, args = {} }) {
     knowledgeFn: (ag, q) => knowledgeContextForAgent(ag, q),
   });
   if (result.endCall) {
-    const rules = await getRules();
-    const mapped = mapLiveKitDisconnect(result.disposition || "completed");
-    mapped.disposition = result.disposition || mapped.disposition;
-    const next = applyOutcome(call, mapped, rules);
-    await saveCall(next);
-    await scheduleFollowUp(next);
+    // Defer hangup for tools that still need to speak a goodbye over LiveKit.
+    // Applying disposition here made the studio poll disconnect mid-TTS ("assistant - speaking"
+    // in transcript but no audio).
+    const deferHangup = name === "end_interaction" || name === "transfer_to_human";
+    if (!deferHangup) {
+      const rules = await getRules();
+      const mapped = mapLiveKitDisconnect(result.disposition || "completed");
+      mapped.disposition = result.disposition || mapped.disposition;
+      const next = applyOutcome(call, mapped, rules);
+      await saveCall(next);
+      await scheduleFollowUp(next);
+    }
   }
   return {
     ok: Boolean(result.ok),

@@ -17,6 +17,7 @@ from pipecat.frames.frames import (
     EndFrame,
     LLMRunFrame,
     TTSSpeakFrame,
+    TTSUpdateSettingsFrame,
 )
 from pipecat.pipeline.pipeline import Pipeline
 from pipecat.pipeline.worker import PipelineParams, PipelineWorker
@@ -47,6 +48,7 @@ from zoco_bridge import (
     record_status,
     record_transcript,
 )
+from language_utils import detect_reply_language, is_backchannel, speech_language
 
 root = Path(__file__).resolve().parent
 load_dotenv(root.parent / ".env")
@@ -63,19 +65,6 @@ def session_body(runner_args: RunnerArguments) -> dict:
     if isinstance(body, dict) and isinstance(body.get("body"), dict) and "callId" not in body:
         return body["body"]
     return body if isinstance(body, dict) else {}
-
-
-def speech_language(code: str) -> str:
-    value = str(code or "en").lower()
-    if value.startswith("hi"):
-        return "hi"
-    if value.startswith("te"):
-        return "te"
-    if value.startswith("ta"):
-        return "ta"
-    if value.startswith("en"):
-        return "en"
-    return "en"
 
 
 def env_secret(name: str) -> str:
@@ -144,6 +133,7 @@ async def run_bot(transport: BaseTransport, runner_args: RunnerArguments):
     instructions = str(snapshot.get("instructions") or "").strip()
     language = snapshot.get("language") or snapshot.get("agent", {}).get("language") or "en-IN"
     spoken = speech_language(language)
+    active_language = {"code": spoken}
     agent = snapshot.get("agent") or {}
     gender = "male" if agent.get("gender") == "male" else "female"
     llm_cfg = snapshot.get("llm") or {}
@@ -173,8 +163,8 @@ async def run_bot(transport: BaseTransport, runner_args: RunnerArguments):
             model=os.getenv("PIPECAT_STT_MODEL", "nova-3"),
             language=spoken,
             interim_results=True,
-            endpointing=300,
-            utterance_end_ms=1200,
+            endpointing=400,
+            utterance_end_ms=1000,
             punctuate=True,
             smart_format=True,
         ),
@@ -200,8 +190,10 @@ async def run_bot(transport: BaseTransport, runner_args: RunnerArguments):
         api_key=llm_cfg.get("apiKey") or os.getenv("OPENROUTER_API_KEY") or os.getenv("OPENAI_API_KEY"),
         settings=OpenAILLMService.Settings(
             model=llm_cfg.get("model") or os.getenv("OPENROUTER_MODEL") or os.getenv("OPENAI_MODEL") or "gpt-4.1",
-            system_instruction=instructions
-            or f"You are {agent.get('name') or 'Zoco'}, on a live phone call. Keep replies short and natural.",
+            system_instruction=(
+                (instructions or f"You are {agent.get('name') or 'Zoco'}, on a live phone call. Keep replies short and natural.")
+                + "\n\nWhen the caller asks to switch language, confirm briefly and continue the SAME call goal in that language in one complete turn. Never stop mid-sentence. Never ask which language if they already chose one. If they say 'Hello? Are you there?' during a language switch, answer that you are here and finish the previous point."
+            ),
         ),
         **llm_kwargs,
     )
@@ -343,8 +335,25 @@ async def run_bot(transport: BaseTransport, runner_args: RunnerArguments):
     @user_aggregator.event_handler("on_user_turn_stopped")
     async def on_user_turn_stopped(aggregator, strategy, message):
         text = getattr(message, "content", None) or ""
-        if text:
-            fire(record_transcript(call_id, "user", text))
+        if not text:
+            return
+        fire(record_transcript(call_id, "user", text))
+        next_lang = detect_reply_language(text, active_language["code"])
+        if next_lang != active_language["code"]:
+            active_language["code"] = next_lang
+            try:
+                await worker.queue_frames(
+                    [
+                        TTSUpdateSettingsFrame(
+                            delta=CartesiaTTSService.Settings(language=next_lang)
+                        )
+                    ]
+                )
+            except Exception:
+                pass
+        if is_backchannel(text) and speak_gate.speaking.is_set():
+            # Caller checked if we are still there while we were speaking — do not restart the whole flow.
+            return
 
     @assistant_aggregator.event_handler("on_assistant_turn_stopped")
     async def on_assistant_turn_stopped(aggregator, message):

@@ -342,9 +342,11 @@ export default function AgentStudio() {
           const closing = livekitSessionRef.current;
           clearInterval(livekitPollRef.current);
           livekitPollRef.current = null;
-          if (closing?.runtime === "pipecat") {
-            await new Promise((resolve) => setTimeout(resolve, 2500));
-          }
+          // LiveKit/Pipecat both need a short drain so the last TTS line is heard
+          // before the browser tears down the room (UI showed "assistant - speaking"
+          // while audio was cut by early disconnect).
+          const drainMs = closing?.runtime === "pipecat" ? 2500 : 3200;
+          await new Promise((resolve) => setTimeout(resolve, drainMs));
           await stopLiveKitSession();
           setPhase("idle");
         }

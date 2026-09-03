@@ -19,7 +19,10 @@
     "pm2:start": "npm install --prefix backend && npm install --prefix frontend && npm install --prefix realtime && npm run build --prefix frontend && npm run build --prefix realtime && pm2 startOrReload ecosystem.config.cjs --update-env && pm2 save",
     "pm2:restart": "pm2 restart zoco-api zoco-web zoco-worker zoco-pipecat",
     "pm2:stop": "pm2 stop zoco-api zoco-web zoco-worker zoco-pipecat",
-    "pm2:logs": "pm2 logs zoco-api zoco-web zoco-worker zoco-pipecat"
+    "pm2:logs": "pm2 logs zoco-api zoco-web zoco-worker zoco-pipecat",
+    "test:voice": "bash scripts/test-voice.sh",
+    "test:realtime": "npm test --prefix realtime",
+    "test:pipecat": "cd pipecat && (test -x .venv/bin/python && .venv/bin/python || python3) -m unittest test_language_cases.py -v"
   },
   "devDependencies": {
     "concurrently": "^9.1.2"

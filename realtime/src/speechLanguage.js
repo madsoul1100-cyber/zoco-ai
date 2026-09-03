@@ -43,16 +43,33 @@ export function detectSpeechLanguage(text, current = "te") {
   return null;
 }
 
+export function isShortAffirmation(text) {
+  const normalized = String(text || "")
+    .trim()
+    .replace(/[^\p{L}\p{M}\p{N}\s]+/gu, " ")
+    .replace(/\s+/g, " ")
+    .trim()
+    .toLowerCase();
+  if (!normalized) return false;
+  return /^(yes|yeah|yep|yup|sure|ok|okay|correct|right|haan|हां|जी|go ahead|yeah sure|yes please|yeah yeah|yes yes|yeah yeah go ahead|yes go ahead|sure go ahead|please go ahead)$/i.test(
+    normalized
+  );
+}
+
 export function looksLikeSttNoise(text, current = "te") {
   const raw = String(text || "").trim();
   if (!raw) return true;
-  const words = raw.split(/\s+/).filter(Boolean);
-  const letters = latinCount(raw);
-  if (/^(yes|yeah|yep|ok|okay|no|nope|sure|haan|हां|जी|hi|hello)$/i.test(raw)) return false;
+  if (isShortAffirmation(raw)) return false;
+  const normalized = raw.replace(/[^\p{L}\p{M}\p{N}\s]+/gu, " ").replace(/\s+/g, " ").trim();
+  const words = normalized.split(/\s+/).filter(Boolean);
+  const letters = latinCount(normalized);
+  // Short acks are real turns in any language (incl. "Yes." with punctuation).
+  if (/^(yes|yeah|yep|ok|okay|no|nope|sure|haan|हां|जी)$/i.test(normalized)) return false;
+  if (current === "en" && /^(hi|hello)$/i.test(normalized)) return false;
 
   if (current === "en") {
     if (words.length === 1 && letters < 12) return true;
-    if (words.length <= 4 && letters < 22 && /^(i am|you are|i said|i saying)\b/i.test(raw) && !/[.!?]$/.test(raw)) {
+    if (words.length <= 4 && letters < 22 && /^(i am|you are|i said|i saying)\b/i.test(normalized) && !/[.!?]$/.test(raw)) {
       return true;
     }
     return false;
@@ -60,10 +77,10 @@ export function looksLikeSttNoise(text, current = "te") {
 
   if (current !== "hi" && current !== "te") return false;
   if (/[\u0900-\u097F\u0C00-\u0C7F]/.test(raw)) return false;
-  if (ROMAN_HINDI.test(raw) && letters >= 12) return false;
+  if (ROMAN_HINDI.test(normalized) && letters >= 12) return false;
   if (/^(?:no\.?\s*){2,}/i.test(raw)) return true;
-  if (/^hello\??\.?$/i.test(raw)) return true;
-  if (/\bwho\b/i.test(raw) && words.length <= 4) return true;
+  if (/^hello\??\.?$/i.test(raw) || /^hello$/i.test(normalized)) return true;
+  if (/\bwho\b/i.test(normalized) && words.length <= 4) return true;
   if (words.length <= 4 && letters < 24) return true;
   return false;
 }

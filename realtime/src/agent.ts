@@ -20,6 +20,14 @@ import {
   recordTranscript,
 } from "./conversationAdapter.js";
 import { detectSpeechLanguage, isLikelyAgentEcho, looksLikeSttNoise } from "./speechLanguage.js";
+import {
+  AEC_WARMUP_MS,
+  POST_GREETING_ECHO_MS,
+  TRANSCRIPTION_TIMEOUT_MS,
+  USER_AWAY_TIMEOUT_S,
+  shouldIgnoreUserAudio as ignoreUserAudio,
+  shouldPromptOnTranscriptionTimeout,
+} from "./sessionTuning.js";
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 dotenv.config({ path: path.resolve(here, "../../.env") });
@@ -134,7 +142,7 @@ export default defineAgent({
         punctuate: true,
         smart_format: true,
         filler_words: false,
-        endpointing: 300,
+        endpointing: 400,
         numerals: true,
       },
     });
@@ -145,7 +153,10 @@ export default defineAgent({
         model: "google/gemma-4-31b-it",
       }),
       tts,
-      aecWarmupDuration: 0.35,
+      // Milliseconds (SDK default 3000). Never pass fractional seconds — 0.35 became 0.35ms.
+      aecWarmupDuration: AEC_WARMUP_MS,
+      userAwayTimeout: USER_AWAY_TIMEOUT_S,
+      transcriptionTimeout: TRANSCRIPTION_TIMEOUT_MS,
       turnHandling: {
         turnDetection: new inference.TurnDetector(),
         interruption: {
@@ -158,8 +169,8 @@ export default defineAgent({
         },
         endpointing: {
           mode: "dynamic",
-          minDelay: 250,
-          maxDelay: 900,
+          minDelay: 200,
+          maxDelay: 650,
         },
         preemptiveGeneration: {
           enabled: true,
@@ -167,11 +178,17 @@ export default defineAgent({
         },
       },
     });
-    session.input.setAudioEnabled(false);
+    // Keep the input timeline continuous. Muting for the whole greeting caused
+    // "Input is shorter by N samples; silence has been prepended" and empty STT finals.
+    session.input.setAudioEnabled(true);
 
     let ending = false;
     let lastSpoken = String(snapshot.greeting || "");
     let listenAfter = 0;
+    let greetingActive = false;
+    let agentBusy = false;
+    let lastRepeatPromptAt = 0;
+    let repeatPromptCount = 0;
     let ttsLanguage: "en" | "hi" | "te" = spokenLanguage === "multi" ? "en" : (spokenLanguage as "en" | "hi" | "te");
     let sttLanguage = switchLanguages ? "multi" : spokenLanguage;
 
@@ -195,11 +212,12 @@ export default defineAgent({
     }
 
     function shouldIgnoreUserAudio(text: string) {
-      const raw = String(text || "").trim();
-      if (!raw) return true;
-      if (Date.now() < listenAfter) return true;
-      if (isLikelyAgentEcho(raw, lastSpoken)) return true;
-      return false;
+      return ignoreUserAudio(text, {
+        greetingActive,
+        listenAfter,
+        lastSpoken,
+        ttsLanguage,
+      });
     }
 
     async function finish(disposition: string, reason: string) {
@@ -241,6 +259,8 @@ export default defineAgent({
           ? "The configured greeting has already been spoken. Do not repeat the introduction. Wait for the customer, then continue the call."
           : "Greet the customer using the configured greeting, then wait.",
         "STT can arrive as short fragments (Aankhen, I am saying any, you are not). Those are not refusals. Ask them to repeat. Never call end_interaction unless they clearly say not interested, stop calling, goodbye, or that the flow is finished in a full sentence.",
+        "When you call end_interaction, put the exact closing sentence in goodbye and do not also write a different spoken reply in the same turn — otherwise the caller hears cut-off audio.",
+        "Short answers like Yes, Yeah, Sure, Yeah sure, Go ahead are real confirmations. Answer them. Do not say you didn't catch that.",
       ]
         .filter(Boolean)
         .join("\n\n"),
@@ -261,24 +281,25 @@ export default defineAgent({
         ];
       },
       onEnter: async (agentCtx) => {
-        session.input.setAudioEnabled(false);
+        session.input.setAudioEnabled(true);
         try {
           if (snapshot.greeting) {
+            greetingActive = true;
             lastSpoken = snapshot.greeting;
-            listenAfter = Date.now() + 60_000;
             const greetStarted = Date.now();
             const handle = agentCtx.session.say(snapshot.greeting, { allowInterruptions: false });
             await recordTranscript(callId, "assistant", snapshot.greeting);
             try {
               await handle.waitForPlayout();
             } catch {
-              /* still unmute */
+              /* continue */
             }
             await recordMetric(callId, "greeting_ms", Date.now() - greetStarted);
-            await new Promise((resolve) => setTimeout(resolve, 400));
+            await new Promise((resolve) => setTimeout(resolve, POST_GREETING_ECHO_MS));
           }
         } finally {
-          listenAfter = Date.now() + 450;
+          greetingActive = false;
+          listenAfter = Date.now() + POST_GREETING_ECHO_MS;
           session.input.setAudioEnabled(true);
         }
       },
@@ -295,7 +316,7 @@ export default defineAgent({
         }),
         end_interaction: llm.tool({
           description:
-            "End the call only after the caller clearly refuses, asks to stop, or finishes the flow. Never use this for Hello, who, No no no, Aankhen, you are not, I am saying any, or other short STT fragments. Always pass goodbye with that exact spoken line, then disposition.",
+            "End the call only after the caller clearly refuses, asks to stop, or finishes the flow. Never use this for Hello, who, No no no, Aankhen, you are not, I am saying any, or other short STT fragments. Pass goodbye as the exact closing line you want spoken (or already spoke). Do not invent a second different closing in the same turn.",
           parameters: z.object({
             goodbye: z.string().describe("The exact short closing line spoken to the caller before hangup"),
             disposition: z
@@ -304,11 +325,25 @@ export default defineAgent({
           }),
           execute: async ({ goodbye, disposition }, { ctx: toolCtx }) => {
             const result = await callTool(callId, "end_interaction", { goodbye, disposition });
-            const spoken = result.say || goodbye;
+            const spoken = String(result.say || goodbye || "").trim();
+            // Drain in-flight LLM speech first so a second goodbye does not cut it off.
+            const drainStarted = Date.now();
+            while (Date.now() - drainStarted < 12_000) {
+              const state = String(toolCtx.session.agentState || "");
+              if (state !== "speaking" && state !== "thinking") break;
+              await new Promise((resolve) => setTimeout(resolve, 150));
+            }
             if (spoken) {
-              await toolCtx.session.say(spoken, { allowInterruptions: true });
+              try {
+                const handle = toolCtx.session.say(spoken, { allowInterruptions: false });
+                await handle.waitForPlayout();
+              } catch {
+                /* still hang up cleanly */
+              }
               await recordTranscript(callId, "assistant", spoken);
             }
+            // Let the last audio packets reach the browser before room teardown.
+            await new Promise((resolve) => setTimeout(resolve, 600));
             await finish(result.disposition || disposition || "success", "agent_end");
             return result.result || "Call ended.";
           },
@@ -322,8 +357,14 @@ export default defineAgent({
           execute: async ({ reason, number }, { ctx: toolCtx }) => {
             const result = await callTool(callId, "transfer_to_human", { reason, number });
             const spoken = result.say || "I am connecting you to a teammate now.";
-            await toolCtx.session.say(spoken, { allowInterruptions: false });
+            try {
+              const handle = toolCtx.session.say(spoken, { allowInterruptions: false });
+              await handle.waitForPlayout();
+            } catch {
+              /* continue */
+            }
             await recordTranscript(callId, "assistant", spoken);
+            await new Promise((resolve) => setTimeout(resolve, 400));
             await finish(result.disposition || "success", result.transfer ? `transfer:${result.transfer}` : "transfer");
             return result.result || "Transfer requested.";
           },
@@ -356,9 +397,45 @@ export default defineAgent({
       await recordTranscript(callId, role, text);
     });
 
+    session.on(voice.AgentSessionEventTypes.AgentStateChanged, (event) => {
+      const next = String((event as { newState?: string }).newState || "");
+      agentBusy = next === "speaking" || next === "thinking";
+    });
+
+    session.on(voice.AgentSessionEventTypes.UserTranscriptionTimeout, async () => {
+      if (
+        !shouldPromptOnTranscriptionTimeout({
+          ending,
+          greetingActive,
+          agentBusy,
+          lastPromptAt: lastRepeatPromptAt,
+          promptCount: repeatPromptCount,
+        })
+      ) {
+        return;
+      }
+      lastRepeatPromptAt = Date.now();
+      repeatPromptCount += 1;
+      try {
+        await session.say(
+          ttsLanguage === "hi"
+            ? "मुझे साफ़ सुनाई नहीं दिया। एक बार फिर से बोलिए?"
+            : ttsLanguage === "te"
+              ? "సరిగ్గా వినిపించలేదు అండి. మళ్లీ చెప్తారా?"
+              : "I didn't catch that clearly. Could you say that again?",
+          { allowInterruptions: true }
+        );
+      } catch {
+        /* ignore */
+      }
+    });
+
     await session.start({
       agent,
       room: ctx.room,
+      inputOptions: {
+        closeOnDisconnect: true,
+      },
       outputOptions: {
         transcriptionEnabled: true,
         syncTranscription: false,
