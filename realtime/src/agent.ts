@@ -19,7 +19,7 @@ import {
   recordStatus,
   recordTranscript,
 } from "./conversationAdapter.js";
-import { detectSpeechLanguage, isLikelyAgentEcho, looksLikeSttNoise } from "./speechLanguage.js";
+import { detectExplicitLanguageSwitch, detectSpeechLanguage, isLikelyAgentEcho, looksLikeSttNoise } from "./speechLanguage.js";
 import {
   AEC_WARMUP_MS,
   POST_GREETING_ECHO_MS,
@@ -124,9 +124,17 @@ export default defineAgent({
       },
     });
 
+    // When language switching is allowed, start STT in multi so Hindi/English
+    // requests are not force-transcribed as Telugu (Kabir demo failure mode).
+    const sttStartLanguage = switchLanguages
+      ? "multi"
+      : spokenLanguage === "multi"
+        ? "en"
+        : spokenLanguage;
+
     const stt = new inference.STT({
       model: "deepgram/nova-3",
-      language: spokenLanguage === "multi" ? "en" : spokenLanguage,
+      language: sttStartLanguage as never,
       modelOptions: {
         keyterm: [
           snapshot.agent?.name,
@@ -136,8 +144,10 @@ export default defineAgent({
           "English",
           "Hindi",
           "Telugu",
+          "हिंदी",
           "Form 18",
           "Priya",
+          "Kabir",
         ].filter(Boolean),
         punctuate: true,
         smart_format: true,
@@ -190,10 +200,12 @@ export default defineAgent({
     let lastRepeatPromptAt = 0;
     let repeatPromptCount = 0;
     let ttsLanguage: "en" | "hi" | "te" = spokenLanguage === "multi" ? "en" : (spokenLanguage as "en" | "hi" | "te");
-    let sttLanguage = switchLanguages ? "multi" : spokenLanguage;
+    let sttLanguage: string = sttStartLanguage;
+    let speechLanguageLocked = false;
 
-    function applySpeechLanguage(next: "en" | "hi" | "te") {
+    function applySpeechLanguage(next: "en" | "hi" | "te", { lock = false }: { lock?: boolean } = {}) {
       if (!switchLanguages) return;
+      if (lock) speechLanguageLocked = true;
       if (next !== ttsLanguage) {
         ttsLanguage = next;
         tts.updateOptions({ language: next as never });
@@ -201,14 +213,28 @@ export default defineAgent({
       if (next !== sttLanguage) {
         sttLanguage = next;
         stt.updateOptions({ language: next as never });
+      } else if (lock) {
+        // Re-assert STT language after an explicit switch — Deepgram can keep
+        // emitting the previous script if the live stream never got the update.
+        stt.updateOptions({ language: next as never });
       }
     }
 
-    function languageFromTurn(text: string, reported?: string) {
-      const fromText = detectSpeechLanguage(text, ttsLanguage);
-      if (fromText) return fromText;
-      if (looksLikeSttNoise(text, ttsLanguage)) return null;
-      return asSpeechLanguage(reported);
+    function syncSpeechLanguageFromUserText(text: string, reported?: string) {
+      const explicit = detectExplicitLanguageSwitch(text);
+      if (explicit) {
+        applySpeechLanguage(explicit, { lock: true });
+        return explicit;
+      }
+      const fromText = detectSpeechLanguage(text, ttsLanguage, { locked: speechLanguageLocked });
+      if (fromText) {
+        applySpeechLanguage(fromText);
+        return fromText;
+      }
+      if (looksLikeSttNoise(text, ttsLanguage) || speechLanguageLocked) return null;
+      const reportedLang = asSpeechLanguage(reported);
+      if (reportedLang) applySpeechLanguage(reportedLang);
+      return reportedLang;
     }
 
     function shouldIgnoreUserAudio(text: string) {
@@ -261,6 +287,7 @@ export default defineAgent({
         "STT can arrive as short fragments (Aankhen, I am saying any, you are not). Those are not refusals. Ask them to repeat. Never call end_interaction unless they clearly say not interested, stop calling, goodbye, or that the flow is finished in a full sentence.",
         "When you call end_interaction, put the exact closing sentence in goodbye and do not also write a different spoken reply in the same turn — otherwise the caller hears cut-off audio.",
         "Short answers like Yes, Yeah, Sure, Yeah sure, Go ahead are real confirmations. Answer them. Do not say you didn't catch that.",
+        "If the caller asks for Hindi or English, switch spoken replies immediately and stay there. Do not answer in Telugu after they asked for Hindi/English.",
       ]
         .filter(Boolean)
         .join("\n\n"),
@@ -272,8 +299,7 @@ export default defineAgent({
           ];
           return;
         }
-        const next = languageFromTurn(text);
-        if (next) applySpeechLanguage(next);
+        syncSpeechLanguageFromUserText(text);
         if (!looksLikeSttNoise(text, ttsLanguage)) return;
         await recordTranscript(callId, "user", text);
         newMessage.content = [
@@ -377,8 +403,7 @@ export default defineAgent({
       if (ending || !event.isFinal) return;
       const text = String(event.transcript || "");
       if (shouldIgnoreUserAudio(text)) return;
-      const next = languageFromTurn(text, event.language || undefined);
-      if (next) applySpeechLanguage(next);
+      syncSpeechLanguageFromUserText(text, event.language || undefined);
     });
 
     session.on(voice.AgentSessionEventTypes.ConversationItemAdded, async (event) => {
@@ -391,8 +416,7 @@ export default defineAgent({
       if (role === "assistant") lastSpoken = text;
       if (role === "user") {
         if (shouldIgnoreUserAudio(text)) return;
-        const next = languageFromTurn(text);
-        if (next) applySpeechLanguage(next);
+        syncSpeechLanguageFromUserText(text);
       }
       await recordTranscript(callId, role, text);
     });

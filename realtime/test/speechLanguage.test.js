@@ -1,10 +1,32 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { detectSpeechLanguage, isLikelyAgentEcho, looksLikeSttNoise } from "../src/speechLanguage.js";
+import {
+  detectExplicitLanguageSwitch,
+  detectSpeechLanguage,
+  isLikelyAgentEcho,
+  looksLikeSttNoise,
+} from "../src/speechLanguage.js";
 
 test("Hindi request and Devanagari pin speech to Hindi", () => {
   assert.equal(detectSpeechLanguage("आपके हिंदी में बात कर सकते हो?", "te"), "hi");
   assert.equal(detectSpeechLanguage("मुझे समझ नहीं आया.", "te"), "hi");
+  assert.equal(detectExplicitLanguageSwitch("मुझ हिंदी में बात करो"), "hi");
+});
+
+test("Telugu-script STT of Hindi request still switches to Hindi", () => {
+  // Live log: Deepgram te heard "हिंदी में बात करो" as Telugu phonetics
+  assert.equal(
+    detectExplicitLanguageSwitch("చెప్పాపకు మేము బోలరాముకి హిందీవే బాతకరు"),
+    "hi"
+  );
+});
+
+test("after Hindi lock, Telugu script must not flip STT back to Telugu", () => {
+  assert.equal(
+    detectSpeechLanguage("యా గీ head, but periya బార్డర్ తెలుగు", "hi", { locked: true }),
+    null
+  );
+  assert.equal(detectSpeechLanguage("అది", "hi", { locked: true }), null);
 });
 
 test("short English STT does not switch a Hindi call to English", () => {
@@ -30,6 +52,7 @@ test("a real English sentence can still switch from Hindi", () => {
     detectSpeechLanguage("please tell me about this because I do not understand the process", "hi"),
     "en"
   );
+  assert.equal(detectExplicitLanguageSwitch("I don't understand Telugu, talk in English"), "en");
 });
 
 test("short English STT fragments are treated as noise on English calls", () => {

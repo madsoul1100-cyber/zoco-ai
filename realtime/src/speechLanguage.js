@@ -16,24 +16,66 @@ export function looksLikeEnglishSentence(text) {
   return markers.length >= 3 && latinCount(raw) >= 28;
 }
 
-export function detectSpeechLanguage(text, current = "te") {
+/**
+ * Explicit caller language-switch requests only.
+ * Includes Telugu-script STT of Hindi/English requests when Deepgram is pinned to `te`
+ * (e.g. "హిందీవే బాతకరు" for "हिंदी में बात करो").
+ */
+export function detectExplicitLanguageSwitch(text) {
+  const raw = String(text || "").trim();
+  if (!raw) return null;
+  const lower = raw.toLowerCase();
+
+  if (
+    (/\bhindi\b/.test(lower) && /\b(talk|speak|in|mein|me|baat|please|karo|bolo|can|you|ho|se|mujhe|mujhse)\b/.test(lower))
+    || (/हिंदी|हिन्दी/.test(raw) && /बात|बोल|में|करो|कर|मुझ/.test(raw))
+    || (/హిందీ|హింది/.test(raw) && /బాత|మాట|మాట్లాడ|కరు|బోల|మేము|మాట్ల/.test(raw))
+  ) {
+    return "hi";
+  }
+
+  if (
+    (/\benglish\b/.test(lower) && /\b(talk|speak|in|mein|please|can|you|don't|dont|understand)\b/.test(lower))
+    || (/(?:don't|dont|do not)\s+understand/.test(lower) && /\btelugu\b/.test(lower))
+    || (/अंग्रेजी|इंग्लिश/.test(raw) && /बात|बोल|में/.test(raw))
+    || (/ఇంగ్లీష్|ఇంగ్లిష్|ఇంగ్లీషు/.test(raw) && /మాట్లాడ|మాట|బాత|అర్థం|అర్ధం/.test(raw))
+  ) {
+    return "en";
+  }
+
+  if (
+    (/\btelugu\b/.test(lower) && /\b(talk|speak|in|mein|please|baat|karo|bolo)\b/.test(lower))
+    || (/తెలుగు/.test(raw) && /మాట్లాడ/.test(raw))
+  ) {
+    return "te";
+  }
+
+  return null;
+}
+
+/**
+ * @param {string} text
+ * @param {string} current
+ * @param {{ locked?: boolean }} [opts]
+ * When locked=true after an explicit switch, do not flip STT back to Telugu
+ * just because Deepgram still emits Telugu script for Hindi audio.
+ */
+export function detectSpeechLanguage(text, current = "te", opts = {}) {
   const raw = String(text || "").trim();
   if (!raw) return null;
 
+  const explicit = detectExplicitLanguageSwitch(raw);
+  if (explicit) return explicit;
+
+  if (opts.locked) {
+    // Still allow a clear English sentence to leave hi/te without saying "English".
+    if ((current === "hi" || current === "te") && looksLikeEnglishSentence(raw)) return "en";
+    return null;
+  }
+
   const hasHindi = /[\u0900-\u097F]/.test(raw);
   const hasTelugu = /[\u0C00-\u0C7F]/.test(raw);
-  const askedHindi =
-    (/\bhindi\b/i.test(raw) && /\b(talk|speak|in|mein|me|baat|please|karo|bolo|can|you|ho)\b/i.test(raw)) ||
-    (/हिंदी|हिन्दी/.test(raw) && /बात|बोल|में/.test(raw));
-  const askedEnglish =
-    (/\benglish\b/i.test(raw) && /\b(talk|speak|in|mein|please|can|you)\b/i.test(raw)) ||
-    (/ఇంగ్లీష్|ఇంగ్లిష్/.test(raw) && /మాట్లాడ/.test(raw));
-  const askedTelugu = /తెలుగు/.test(raw) && /మాట్లాడ/.test(raw);
 
-  if (askedHindi) return "hi";
-  if (askedEnglish) return "en";
-  if (askedTelugu) return "te";
-  if (/(?:don't|dont|do not)\s+understand/i.test(raw) && /\btelugu\b/i.test(raw)) return "en";
   if (hasHindi && !hasTelugu) return "hi";
   if (hasTelugu) return "te";
   if (current === "hi" || current === "te") {
@@ -60,6 +102,7 @@ export function looksLikeSttNoise(text, current = "te") {
   const raw = String(text || "").trim();
   if (!raw) return true;
   if (isShortAffirmation(raw)) return false;
+  if (detectExplicitLanguageSwitch(raw)) return false;
   const normalized = raw.replace(/[^\p{L}\p{M}\p{N}\s]+/gu, " ").replace(/\s+/g, " ").trim();
   const words = normalized.split(/\s+/).filter(Boolean);
   const letters = latinCount(normalized);
