@@ -26,6 +26,7 @@ import {
   getInbound,
   getInboundById,
   getKnowledgeBase,
+  indexKnowledgeBase,
   listAgents,
   listCalls,
   listCallsByCampaign,
@@ -34,6 +35,7 @@ import {
   listCampaigns,
   listInbounds,
   listKnowledgeBases,
+  loadKnowledgeChunks,
   saveAgent,
   saveCall,
   saveCampaign,
@@ -43,7 +45,8 @@ import {
   saveKnowledgeBase,
 } from "../store.js";
 import { inboundLineStatus, publicTelephony, resolveTelephony, syncInboundWebhook } from "../telephony/index.js";
-import { documentBytes, fileKind, knowledgeStats, retrieveFromKnowledge } from "../engine/knowledge.js";
+import { documentBytes, fileKind, knowledgeStats } from "../engine/knowledge.js";
+import { retrieveHybrid } from "../engine/knowledgeIndex.js";
 
 function textFromUpload(file) {
   const name = file?.originalname || "document.txt";
@@ -133,6 +136,16 @@ export function mountProductRoutes(app, { upload } = {}) {
     res.json({ ok: true });
   });
 
+  app.post("/api/knowledge/:id/reindex", async (req, res) => {
+    const kb = await getKnowledgeBase(req.params.id);
+    if (!kb) return res.status(404).json({ error: "Knowledge base not found" });
+    try {
+      res.json(publicKnowledge(await indexKnowledgeBase(kb)));
+    } catch (error) {
+      res.status(500).json({ error: error.message || "Reindex failed" });
+    }
+  });
+
   app.post("/api/knowledge/:id/documents", upload?.array?.("file", 12) || ((req, _res, next) => next()), async (req, res) => {
     const kb = await getKnowledgeBase(req.params.id);
     if (!kb) return res.status(404).json({ error: "Knowledge base not found" });
@@ -166,7 +179,14 @@ export function mountProductRoutes(app, { upload } = {}) {
     }
     if (!added.length) return res.status(400).json({ error: "Paste text or upload a .txt / .md / .csv file" });
     kb.documents = [...(kb.documents || []), ...added];
-    res.status(201).json(publicKnowledge(await saveKnowledgeBase(kb)));
+    const saved = await saveKnowledgeBase(kb);
+    let indexed = saved;
+    try {
+      indexed = await indexKnowledgeBase(saved);
+    } catch (error) {
+      console.warn(`Knowledge index after upload failed for ${kb.id}:`, error.message || error);
+    }
+    res.status(201).json(publicKnowledge(indexed));
   });
 
   app.post("/api/knowledge/:id/query", async (req, res) => {
@@ -174,9 +194,14 @@ export function mountProductRoutes(app, { upload } = {}) {
     if (!kb) return res.status(404).json({ error: "Knowledge base not found" });
     const question = String(req.body?.question || "").trim();
     if (question.length < 3) return res.status(400).json({ error: "Ask a question to test retrieval" });
+    const { hits, mode } = await retrieveHybrid([kb], question, {
+      limit: 8,
+      loadChunks: loadKnowledgeChunks,
+    });
     res.json({
       question,
-      matches: retrieveFromKnowledge(kb, question),
+      mode,
+      matches: hits,
       stats: knowledgeStats(kb),
     });
   });
@@ -185,7 +210,14 @@ export function mountProductRoutes(app, { upload } = {}) {
     const kb = await getKnowledgeBase(req.params.id);
     if (!kb) return res.status(404).json({ error: "Knowledge base not found" });
     kb.documents = (kb.documents || []).filter((doc) => doc.id !== req.params.docId);
-    res.json(publicKnowledge(await saveKnowledgeBase(kb)));
+    const saved = await saveKnowledgeBase(kb);
+    let indexed = saved;
+    try {
+      indexed = await indexKnowledgeBase(saved);
+    } catch (error) {
+      console.warn(`Knowledge index after delete failed for ${kb.id}:`, error.message || error);
+    }
+    res.json(publicKnowledge(indexed));
   });
 
   async function decorateInbound(item, tel, line) {

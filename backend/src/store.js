@@ -3,7 +3,8 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { cacheDel, cacheGet, cacheSet } from "./infra/cache.js";
 import { col, fromDoc, mongoState, toDoc } from "./infra/mongo.js";
-import { retrieveFromKnowledge } from "./engine/knowledge.js";
+import { knowledgeCatalog, retrieveFromKnowledge } from "./engine/knowledge.js";
+import { reindexKnowledgeBase, retrieveHybrid } from "./engine/knowledgeIndex.js";
 import { defaultTelephony } from "./phone.js";
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../..");
@@ -177,6 +178,11 @@ export async function getCallByTwilioSid(sid) {
   return fromDoc(await col("calls").findOne({ twilioSid: sid }));
 }
 
+export async function getCallByExotelSid(sid) {
+  if (!sid) return null;
+  return fromDoc(await col("calls").findOne({ exotelSid: sid }));
+}
+
 export async function saveCall(call) {
   call.updatedAt = new Date().toISOString();
   await col("calls").replaceOne({ _id: call.id }, toDoc(call), { upsert: true });
@@ -298,6 +304,69 @@ export async function saveKnowledgeBase(kb) {
 
 export async function deleteKnowledgeBase(id) {
   await col("knowledgeBases").deleteOne({ _id: id });
+  await deleteKnowledgeChunks(id);
+}
+
+export async function replaceKnowledgeChunks(kbId, chunks = []) {
+  await col("knowledgeChunks").deleteMany({ kbId });
+  if (!chunks.length) return [];
+  const docs = chunks.map((chunk) => ({
+    _id: chunk.id,
+    kbId: chunk.kbId || kbId,
+    docId: chunk.docId,
+    name: chunk.name,
+    kind: chunk.kind,
+    excerpt: chunk.excerpt,
+    chunk: chunk.chunk,
+    embedding: Array.isArray(chunk.embedding) ? chunk.embedding : [],
+    updatedAt: chunk.updatedAt || new Date().toISOString(),
+  }));
+  await col("knowledgeChunks").insertMany(docs);
+  return docs;
+}
+
+export async function deleteKnowledgeChunks(kbId, docId = null) {
+  const filter = docId ? { kbId, docId } : { kbId };
+  await col("knowledgeChunks").deleteMany(filter);
+}
+
+export async function loadKnowledgeChunks(kbIds = []) {
+  const ids = (Array.isArray(kbIds) ? kbIds : [kbIds]).filter(Boolean);
+  if (!ids.length) return [];
+  const docs = await col("knowledgeChunks").find({ kbId: { $in: ids } }).toArray();
+  return docs.map((doc) => ({
+    id: doc._id,
+    kbId: doc.kbId,
+    docId: doc.docId,
+    name: doc.name,
+    kind: doc.kind,
+    excerpt: doc.excerpt,
+    chunk: doc.chunk,
+    embedding: doc.embedding || [],
+  }));
+}
+
+export async function indexKnowledgeBase(kb) {
+  if (!kb?.id) return kb;
+  const indexed = await reindexKnowledgeBase(kb, {
+    replaceChunks: replaceKnowledgeChunks,
+  });
+  return saveKnowledgeBase(indexed);
+}
+
+/**
+ * Catalog-only context for session start (no full KB dump).
+ * Agents should call query_knowledge for facts mid-call.
+ */
+export async function knowledgeCatalogForAgent(agent, { maxChars = 1200 } = {}) {
+  const ids = agent?.knowledgeBaseIds || [];
+  if (!ids.length) return "";
+  const bases = (await Promise.all(ids.map((id) => getKnowledgeBase(id)))).filter(Boolean);
+  if (!bases.length) return "";
+  const catalogs = bases.map((kb) => knowledgeCatalog(kb)).filter(Boolean);
+  const guide =
+    "Attached knowledge bases (file catalog only). For any factual question, call query_knowledge — do not invent answers from memory when a matching document exists.";
+  return [guide, ...catalogs].join("\n\n").slice(0, maxChars);
 }
 
 export async function knowledgeContextForAgent(agent, question = "", { limit = 4, maxChars = 4000 } = {}) {
@@ -305,21 +374,23 @@ export async function knowledgeContextForAgent(agent, question = "", { limit = 4
   if (!ids.length) return "";
   const bases = (await Promise.all(ids.map((id) => getKnowledgeBase(id)))).filter(Boolean);
   if (!bases.length) return "";
-  const retrieved = question
-    ? bases.flatMap((kb) =>
-        retrieveFromKnowledge(kb, question, limit).map((hit) => `${kb.name} / ${hit.name}:\n${hit.excerpt}`)
-      )
-    : [];
-  if (retrieved.length) return retrieved.join("\n\n").slice(0, maxChars);
-  return bases
-    .map((kb) => {
-      const body = (kb.documents || [])
-        .map((doc) => `${doc.name || "note"}:\n${doc.text || ""}`)
-        .join("\n\n");
-      return `${kb.name}\n${kb.description || ""}\n${body}`.trim();
-    })
-    .join("\n\n")
-    .slice(0, Math.max(maxChars, 2000));
+  const q = String(question || "").trim();
+  if (!q) {
+    return knowledgeCatalogForAgent(agent, { maxChars: Math.min(maxChars, 1200) });
+  }
+  try {
+    const { text } = await retrieveHybrid(bases, q, {
+      limit,
+      loadChunks: loadKnowledgeChunks,
+    });
+    if (text) return text.slice(0, maxChars);
+  } catch (error) {
+    console.warn("Hybrid knowledge retrieve failed, keyword fallback:", error.message || error);
+  }
+  const retrieved = bases.flatMap((kb) =>
+    retrieveFromKnowledge(kb, q, limit).map((hit) => `${kb.name} / ${hit.name}:\n${hit.excerpt}`)
+  );
+  return retrieved.join("\n\n").slice(0, maxChars);
 }
 
 export function defaultInbound() {

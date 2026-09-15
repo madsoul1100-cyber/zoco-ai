@@ -352,6 +352,7 @@ export function mountExotelStream(server) {
 
       if (event.event === "start") {
         session.streamSid = event.start?.stream_sid || event.stream_sid || "";
+        const exotelCallSid = event.start?.call_sid || event.call_sid || "";
         try {
           const snapshot = await buildSessionSnapshot(callId);
           const liveCall = await getCall(callId);
@@ -361,7 +362,8 @@ export function mountExotelStream(server) {
             liveCall.status = "in_progress";
             liveCall.disposition = "in_progress";
             liveCall.runtime = "exotel";
-            liveCall.exotel = { streamSid: session.streamSid };
+            if (exotelCallSid && !liveCall.exotelSid) liveCall.exotelSid = exotelCallSid;
+            liveCall.exotel = { streamSid: session.streamSid, callSid: exotelCallSid || liveCall.exotelSid || "" };
             liveCall.nudgeIndex = 0;
             if (!liveCall.startedAt) liveCall.startedAt = new Date().toISOString();
             await attachTurn(liveCall, {

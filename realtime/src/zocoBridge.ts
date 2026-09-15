@@ -84,9 +84,21 @@ function headers(token: string) {
   };
 }
 
+const BRIDGE_FETCH_TIMEOUT_MS = 8_000;
+
+async function bridgeFetch(url: string, init: RequestInit = {}) {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), BRIDGE_FETCH_TIMEOUT_MS);
+  try {
+    return await fetch(url, { ...init, signal: controller.signal });
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
 export async function fetchSnapshot(callId: string): Promise<SessionSnapshot> {
   const { baseUrl, token } = bridgeConfig();
-  const response = await fetch(`${baseUrl}/api/livekit/sessions/${encodeURIComponent(callId)}/snapshot`, {
+  const response = await bridgeFetch(`${baseUrl}/api/livekit/sessions/${encodeURIComponent(callId)}/snapshot`, {
     headers: headers(token),
   });
   const data = await response.json().catch(() => ({}));
@@ -102,7 +114,7 @@ export async function postTurn(callId: string, payload: {
   sttLanguage?: string | null;
 }): Promise<TurnReply> {
   const { baseUrl, token } = bridgeConfig();
-  const response = await fetch(`${baseUrl}/api/livekit/sessions/${encodeURIComponent(callId)}/turn`, {
+  const response = await bridgeFetch(`${baseUrl}/api/livekit/sessions/${encodeURIComponent(callId)}/turn`, {
     method: "POST",
     headers: headers(token),
     body: JSON.stringify(payload),
@@ -120,7 +132,7 @@ export async function postTool(callId: string, payload: {
   args?: Record<string, unknown>;
 }): Promise<ToolReply> {
   const { baseUrl, token } = bridgeConfig();
-  const response = await fetch(`${baseUrl}/api/livekit/sessions/${encodeURIComponent(callId)}/tools`, {
+  const response = await bridgeFetch(`${baseUrl}/api/livekit/sessions/${encodeURIComponent(callId)}/tools`, {
     method: "POST",
     headers: headers(token),
     body: JSON.stringify(payload),
@@ -134,7 +146,7 @@ export async function postTool(callId: string, payload: {
 
 export async function postEvent(callId: string, payload: SessionEventPayload): Promise<{ ok: boolean; duplicate?: boolean }> {
   const { baseUrl, token } = bridgeConfig();
-  const response = await fetch(`${baseUrl}/api/livekit/sessions/${encodeURIComponent(callId)}/events`, {
+  const response = await bridgeFetch(`${baseUrl}/api/livekit/sessions/${encodeURIComponent(callId)}/events`, {
     method: "POST",
     headers: headers(token),
     body: JSON.stringify(payload),

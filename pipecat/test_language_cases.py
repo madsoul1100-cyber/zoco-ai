@@ -24,6 +24,8 @@ class PipecatVoiceScenarios(unittest.TestCase):
         self.assertTrue(is_backchannel("Hello? Are you there?"))
         self.assertTrue(is_backchannel("Hello? Are you there? Yeah."))
         self.assertTrue(is_backchannel("Yeah."))
+        self.assertTrue(is_backchannel("Mmm."))
+        self.assertTrue(is_backchannel("uh huh"))
         self.assertFalse(is_backchannel("I would like to complete my registration."))
         self.assertFalse(is_backchannel("I listen it already. You said it."))
 

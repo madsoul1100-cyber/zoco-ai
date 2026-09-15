@@ -47,7 +47,7 @@ def is_backchannel(text: str) -> bool:
     raw = re.sub(r"\s+", " ", raw).strip()
     if not raw:
         return False
-    if re.fullmatch(r"hmm+", raw):
+    if re.fullmatch(r"(?:h+m+|m+m+|uh huh|uh-huh|mhm|hm+)", raw):
         return True
     return raw in {
         "hello",

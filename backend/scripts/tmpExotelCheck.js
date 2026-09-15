@@ -1,0 +1,15 @@
+import { loadEnv } from "../src/loadEnv.js";
+loadEnv();
+const { MongoClient } = await import("mongodb");
+const c = new MongoClient(process.env.MONGODB_URI, { ignoreUndefined: true });
+await c.connect();
+const db = c.db(process.env.MONGODB_DB || "zoco");
+const calls = db.collection("calls");
+console.log("runtime=exotel count:", await calls.countDocuments({ runtime: "exotel" }));
+console.log("exotelSid present count:", await calls.countDocuments({ exotelSid: { $ne: null } }));
+console.log("twilioSid present count:", await calls.countDocuments({ twilioSid: { $ne: null } }));
+console.log("distinct runtimes:", JSON.stringify(await calls.distinct("runtime")));
+console.log("distinct channels:", JSON.stringify(await calls.distinct("channel")));
+console.log("S3 bucket in use:", process.env.AWS_S3_BUCKET || process.env.S3_BUCKET);
+console.log("S3 region in use:", process.env.AWS_REGION || process.env.S3_REGION);
+await c.close();

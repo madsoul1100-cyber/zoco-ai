@@ -315,6 +315,26 @@ export function looksLikeLanguage(text, code) {
   return detectLanguageFromText(text, code) === normalizeLanguage(code);
 }
 
+/**
+ * Language of a piece of *authored* text, from its script alone.
+ *
+ * Unlike detectLanguageFromText this ignores "please speak Hindi" style requests and
+ * STT-garble heuristics — those exist for live caller speech. Here the input is text we
+ * wrote ourselves (an agent greeting), so the script is authoritative.
+ *
+ * Returns null when there is not enough signal to decide.
+ */
+export function detectScriptLanguage(text) {
+  const raw = String(text || "").trim();
+  if (!raw) return null;
+  for (const { re, code } of SCRIPT_LANGS) {
+    if (re.test(raw)) return code;
+  }
+  const letters = raw.replace(/[^A-Za-z]/g, "");
+  if (letters.length >= 6) return HINGLISH.test(raw) ? "hi-IN" : "en-IN";
+  return null;
+}
+
 const TTS_PUNCT = /[!?¿¡؟।॥…,.;:"""''`()[\]{}]/g;
 const NOISE_PHRASE =
   /exclamation\s*(point|mark)?|question\s*mark|full\s*stop|\bperiod\b|\bcomma\b|एक्सक्लेमेशन(?:\s*(?:पॉइंट|प्वाइंट|प्वाइन्ट))?|एक्स्क्लेमेशन|क्वेश्चन\s*मार्क|फुल\s*स्टॉप|प्रश्न\s*चिह्न|पूर्ण\s*विराम/gi;

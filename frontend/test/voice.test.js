@@ -41,6 +41,14 @@ test("agent TTS echo is ignored as noise / barge", () => {
   assert.equal(isLikelyAgentEcho("Hindi mein baat kariye", GREETING), false);
 });
 
+test("Meera greeting opener नमस्ते echo is filtered in studio UI logic", () => {
+  const meera =
+    "नमस्ते, क्या मैं Ravi जी से बात कर रही हूँ? मैं CarePoint Clinic से Meera हूँ।";
+  assert.equal(isLikelyAgentEcho("नमस्ते", meera), true);
+  assert.equal(isLikelyAgentEcho("speakingनमस्ते", meera), true);
+  assert.equal(isNoiseTranscript("speakingनमस्ते", meera), true);
+});
+
 test("short intelligible phrases qualify as barge-in", () => {
   for (const sample of [
     "Hindi please",

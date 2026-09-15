@@ -23,7 +23,7 @@ fi
 echo ""
 echo "== Frontend voice helpers =="
 if [[ -f "$ROOT/frontend/test/voice.test.js" ]]; then
-  if ! (cd "$ROOT/frontend" && node --test test/voice.test.js); then
+  if ! (cd "$ROOT/frontend" && node --test test/voice.test.js test/livekitTranscription.test.js); then
     FAIL=1
   fi
 fi

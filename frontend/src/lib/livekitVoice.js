@@ -1,4 +1,6 @@
 import { ParticipantEvent, Room, RoomEvent, Track } from "livekit-client";
+import { createCaptionAccumulator } from "./livekitCaptions.js";
+import { isLikelyAgentEcho } from "./voice.js";
 
 function isAgentParticipant(participant) {
   if (!participant) return false;
@@ -10,6 +12,12 @@ function isAgentParticipant(participant) {
   return false;
 }
 
+/**
+ * LiveKit browser client:
+ * - Mic stays ON so the rest of a slow sentence is never cut
+ * - If the caller talks over the agent, audio still reaches STT (barge-in)
+ * - Captions accumulate by segment id so the full spoken line stays visible
+ */
 export async function connectLiveKitVoice({
   url,
   token,
@@ -17,26 +25,36 @@ export async function connectLiveKitVoice({
   onSpeaking,
   onDisconnected,
   onAgentJoined,
+  captureContext,
+  captureDestination,
 } = {}) {
   const room = new Room({
     adaptiveStream: true,
     dynacast: true,
-    webAudioMix: false,
     audioCaptureDefaults: {
       echoCancellation: true,
       noiseSuppression: true,
       autoGainControl: true,
-      voiceIsolation: true,
     },
   });
 
-  const attached = new Set();
-  const agentTracks = [];
-  const captions = new Map();
   let agentAudioStarted = false;
   let resolveAgentAudio;
-  let userSpeaking = false;
-  let agentSpeaking = false;
+  let agentSpeakerActive = false;
+  let agentVadActive = false;
+  let lastAssistantText = "";
+  let agentParticipant = null;
+  // voice-caption-segment-map-v1
+  const userCaptions = createCaptionAccumulator();
+  const assistantCaptions = createCaptionAccumulator();
+
+  function agentAudioActive() {
+    return agentSpeakerActive || agentVadActive;
+  }
+
+  function notifyAgentSpeaking() {
+    onSpeaking?.(agentAudioActive());
+  }
 
   function noteAgentAudio() {
     if (agentAudioStarted) return;
@@ -44,69 +62,78 @@ export async function connectLiveKitVoice({
     resolveAgentAudio?.();
   }
 
-  function setAgentPlayback(on) {
-    for (const track of agentTracks) {
+  /*
+   * voice-record-agent-leg-v1
+   *
+   * Route the agent's audio into the call recorder as well as the speakers.
+   *
+   * Previously only the microphone reached the recorder, so the agent survived in
+   * recordings solely as acoustic bleed from the laptop speakers — quiet, echoed, and
+   * absent entirely on headphones. A call audit found 17 of 49 recordings with no usable
+   * agent audio, which made them useless for judging call quality.
+   */
+  const captureSources = new Set();
+
+  function captureAgentTrack(track) {
+    if (!captureContext || !captureDestination) return;
+    const mediaStreamTrack = track?.mediaStreamTrack;
+    if (!mediaStreamTrack) return;
+    try {
+      const source = captureContext.createMediaStreamSource(new MediaStream([mediaStreamTrack]));
+      source.connect(captureDestination);
+      captureSources.add(source);
+    } catch {
+      /* recording the agent leg is best-effort; never block playback */
+    }
+  }
+
+  function releaseCaptureSources() {
+    for (const source of captureSources) {
       try {
-        track.setVolume?.(on ? 1 : 0);
+        source.disconnect();
       } catch {
-        /* ignore */
+        /* already torn down */
       }
     }
+    captureSources.clear();
   }
 
-  function syncPlayback() {
-    onSpeaking?.(agentSpeaking);
-    setAgentPlayback(!(userSpeaking && agentSpeaking));
-  }
-
-  function attachTrack(track, participant) {
-    if (!track || track.kind !== Track.Kind.Audio || attached.has(track.sid)) return;
-    const el = track.attach();
-    el.autoplay = true;
-    el.playsInline = true;
-    el.style.display = "none";
-    document.body.appendChild(el);
-    attached.add(track.sid);
-    if (typeof track.setVolume === "function") agentTracks.push(track);
-    void el.play?.().catch(() => {});
-    if (participant && participant !== room.localParticipant) {
-      noteAgentAudio();
-      agentSpeaking = true;
-      syncPlayback();
-    }
+  function watchAgent(participant) {
+    if (!isAgentParticipant(participant) || agentParticipant === participant) return;
+    agentParticipant = participant;
+    onAgentJoined?.(participant);
+    participant.on(ParticipantEvent.IsSpeakingChanged, (speaking) => {
+      agentVadActive = Boolean(speaking);
+      notifyAgentSpeaking();
+    });
   }
 
   room.on(RoomEvent.TrackSubscribed, (track, _publication, participant) => {
-    attachTrack(track, participant);
+    if (track?.kind !== Track.Kind.Audio || !participant || participant === room.localParticipant) return;
+    noteAgentAudio();
+    track.attach().play?.().catch(() => {});
+    captureAgentTrack(track);
   });
 
   room.on(RoomEvent.ActiveSpeakersChanged, (speakers) => {
-    agentSpeaking = speakers.some((speaker) => isAgentParticipant(speaker) || speaker !== room.localParticipant);
-    userSpeaking = speakers.some((speaker) => speaker === room.localParticipant);
-    syncPlayback();
+    agentSpeakerActive = speakers.some((speaker) => isAgentParticipant(speaker));
+    notifyAgentSpeaking();
   });
 
   room.on(RoomEvent.TranscriptionReceived, (segments, participant) => {
     const role = isAgentParticipant(participant) ? "assistant" : "user";
-    for (const segment of segments || []) {
-      if (!segment?.id) continue;
-      const incoming = {
-        text: String(segment.text || "").trim(),
-        final: segment.final !== false,
-        role,
-      };
-      if (!incoming.final) {
-        for (const [id, item] of captions) {
-          if (item.role === role && item.final) captions.delete(id);
-        }
-      }
-      captions.set(segment.id, incoming);
-    }
-    const parts = [...captions.values()].filter((item) => item.role === role && item.text);
-    const text = parts.map((item) => item.text).join(" ").trim();
+    const bucket = role === "assistant" ? assistantCaptions : userCaptions;
+    const { text, isFinal } = bucket.ingest(segments, role);
     if (!text) return;
-    const isFinal = parts.length > 0 && parts.every((item) => item.final);
-    onTranscript?.({ text, isFinal, role });
+
+    if (role === "assistant") {
+      lastAssistantText = text;
+      onTranscript?.({ text, isFinal, role });
+      return;
+    }
+
+    if (isLikelyAgentEcho(text, lastAssistantText)) return;
+    onTranscript?.({ text, isFinal, role, speaking: !isFinal });
   });
 
   room.on(RoomEvent.Disconnected, () => {
@@ -114,25 +141,29 @@ export async function connectLiveKitVoice({
   });
 
   room.on(RoomEvent.ParticipantConnected, (participant) => {
-    if (isAgentParticipant(participant)) onAgentJoined?.(participant);
+    watchAgent(participant);
   });
 
   await room.connect(url, token);
   await room.startAudio().catch(() => {});
-
-  room.localParticipant.on(ParticipantEvent.IsSpeakingChanged, (speaking) => {
-    userSpeaking = Boolean(speaking);
-    syncPlayback();
-  });
+  try {
+    await room.localParticipant.setMicrophoneEnabled(true);
+  } catch {
+    /* ignore */
+  }
 
   for (const participant of room.remoteParticipants.values()) {
-    if (isAgentParticipant(participant)) onAgentJoined?.(participant);
+    watchAgent(participant);
     participant.audioTrackPublications?.forEach?.((publication) => {
-      if (publication.track) attachTrack(publication.track, participant);
+      if (publication.track?.kind === Track.Kind.Audio) {
+        noteAgentAudio();
+        publication.track.attach().play?.().catch(() => {});
+        captureAgentTrack(publication.track);
+      }
     });
   }
 
-  const waitForAgent = new Promise((resolve, reject) => {
+  await new Promise((resolve, reject) => {
     const existing = [...room.remoteParticipants.values()].filter((p) => p !== room.localParticipant);
     if (existing.length) {
       resolve();
@@ -150,13 +181,11 @@ export async function connectLiveKitVoice({
       if (participant === room.localParticipant) return;
       clearTimeout(timer);
       room.off(RoomEvent.ParticipantConnected, onJoin);
-      onAgentJoined?.(participant);
+      watchAgent(participant);
       resolve();
     }
     room.on(RoomEvent.ParticipantConnected, onJoin);
   });
-
-  await waitForAgent;
 
   if (!agentAudioStarted) {
     await Promise.race([
@@ -168,9 +197,6 @@ export async function connectLiveKitVoice({
     ]);
   }
 
-  await new Promise((resolve) => setTimeout(resolve, 350));
-  await room.localParticipant.setMicrophoneEnabled(true);
-
   return {
     room,
     async disconnect() {
@@ -179,9 +205,8 @@ export async function connectLiveKitVoice({
       } catch {
         /* ignore */
       }
+      releaseCaptureSources();
       await room.disconnect();
-      attached.clear();
-      agentTracks.length = 0;
     },
   };
 }

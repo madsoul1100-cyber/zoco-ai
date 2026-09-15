@@ -25,6 +25,20 @@ export async function recordTranscript(callId: string, role: "user" | "assistant
   });
 }
 
+/** Fire-and-forget — bridge I/O must not block the LiveKit job heartbeat. */
+export function recordTranscriptDetached(
+  callId: string,
+  role: "user" | "assistant" | "system",
+  text: string,
+  extra: Record<string, string> = {}
+) {
+  void recordTranscript(callId, role, text, extra).catch(() => {});
+}
+
+export function recordMetricDetached(callId: string, name: string, value: number | string, extra: Record<string, number | string> = {}) {
+  void recordMetric(callId, name, value, extra).catch(() => {});
+}
+
 export async function recordMetric(callId: string, name: string, value: number | string, extra: Record<string, number | string> = {}) {
   await postEvent(callId, {
     eventId: eventId("metric"),

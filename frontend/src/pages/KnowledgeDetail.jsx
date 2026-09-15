@@ -20,7 +20,9 @@ export default function KnowledgeDetail() {
   const [note, setNote] = useState({ name: "", text: "" });
   const [question, setQuestion] = useState("");
   const [hits, setHits] = useState(null);
+  const [retrievalMode, setRetrievalMode] = useState("");
   const [searching, setSearching] = useState(false);
+  const [reindexing, setReindexing] = useState(false);
   const [menu, setMenu] = useState("");
 
   async function load(nextId = id) {
@@ -38,6 +40,7 @@ export default function KnowledgeDetail() {
 
   useEffect(() => {
     setHits(null);
+    setRetrievalMode("");
     setFileQuery("");
     load().catch((err) => setError(err.message));
   }, [id]);
@@ -98,10 +101,23 @@ export default function KnowledgeDetail() {
     try {
       const result = await api.queryKnowledge(kb.id, question.trim());
       setHits(result.matches || []);
+      setRetrievalMode(result.mode || "");
     } catch (err) {
       setError(err.message);
     } finally {
       setSearching(false);
+    }
+  }
+
+  async function reindex() {
+    setReindexing(true);
+    setError("");
+    try {
+      setKb(await api.reindexKnowledge(kb.id));
+    } catch (err) {
+      setError(err.message);
+    } finally {
+      setReindexing(false);
     }
   }
 
@@ -136,6 +152,9 @@ export default function KnowledgeDetail() {
         <div className="row">
           <button className="btn ghost" type="button" onClick={() => setEditOpen(true)}>Edit</button>
           <button className="btn ghost" type="button" onClick={() => setNoteOpen(true)}>Add text note</button>
+          <button className="btn ghost" type="button" onClick={reindex} disabled={reindexing || !stats.files}>
+            {reindexing ? "Indexing…" : "Reindex"}
+          </button>
           <button className="btn" type="button" onClick={() => fileRef.current?.click()}>Upload files</button>
           <input
             ref={fileRef}
@@ -172,6 +191,18 @@ export default function KnowledgeDetail() {
             <div>
               <dt>Status</dt>
               <dd><span className={`badge ${stats.status === "synced" ? "done" : "recall"}`}>{stats.status === "synced" ? "Synced" : "Empty"}</span></dd>
+            </div>
+            <div>
+              <dt>Index</dt>
+              <dd>
+                <span className={`badge ${stats.indexStatus === "ready" ? "done" : "recall"}`}>
+                  {stats.indexStatus === "ready"
+                    ? `Vector · ${stats.chunkCount || 0} chunks`
+                    : stats.indexStatus === "keyword_only"
+                      ? `Keyword · ${stats.chunkCount || 0} chunks`
+                      : stats.indexStatus || "—"}
+                </span>
+              </dd>
             </div>
             <div>
               <dt>Created</dt>
@@ -248,7 +279,10 @@ export default function KnowledgeDetail() {
         <div className="sheet-toolbar">
           <div>
             <h3>Test retrieval</h3>
-            <p className="muted">Ask a question to preview what agents will find in this knowledge base.</p>
+            <p className="muted">
+              Ask a question to preview what agents will find
+              {retrievalMode ? ` · mode: ${retrievalMode}` : ""}.
+            </p>
           </div>
         </div>
         <form className="retrieval-bar" onSubmit={testRetrieval}>
@@ -271,7 +305,10 @@ export default function KnowledgeDetail() {
                 <li key={`${hit.docId}-${index}`}>
                   <div className="row" style={{ justifyContent: "space-between" }}>
                     <strong>{hit.name}</strong>
-                    <span className="muted">{hit.score}% match</span>
+                    <span className="muted">
+                      {hit.score}% · {hit.mode || retrievalMode || "keyword"}
+                      {hit.vectorScore ? ` · v${Math.round(hit.vectorScore * 100)}` : ""}
+                    </span>
                   </div>
                   <p>{hit.excerpt}</p>
                 </li>

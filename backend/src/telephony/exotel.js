@@ -158,31 +158,50 @@ export function mapExotelStatus(status) {
   return null;
 }
 
+export function exotelInboundStreamResolverUrl(tel) {
+  return tel.publicBaseUrl ? `${tel.publicBaseUrl}/webhooks/exotel/inbound` : "";
+}
+
+export function exotelPassthruUrl(tel) {
+  return tel.publicBaseUrl ? `${tel.publicBaseUrl}/webhooks/exotel/passthru` : "";
+}
+
 export async function inboundLineStatus(tel) {
-  const expectedUrl = tel.publicBaseUrl
-    ? `${tel.publicBaseUrl}/webhooks/exotel/inbound`
-    : "";
+  const streamResolverUrl = exotelInboundStreamResolverUrl(tel);
+  const passthruUrl = exotelPassthruUrl(tel);
   return {
-    expectedUrl,
-    wired: Boolean(tel.exotelReady),
+    expectedUrl: streamResolverUrl,
+    streamResolverUrl,
+    passthruUrl,
+    wired: Boolean(tel.exotelReady && streamResolverUrl),
     publicReachable: Boolean(tel.publicBaseUrl),
     exotelReady: Boolean(tel.exotelReady),
     fromNumber: tel.fromNumber || "",
     error: tel.exotelReady
       ? null
       : "Connect Exotel API key, token, Exophone, and a public HTTPS URL.",
+    dashboardHint: tel.exotelReady
+      ? `In my.exotel.com, set the Voicebot applet URL to ${streamResolverUrl} (HTTPS, dynamic WSS). Add a Passthru applet after it pointing to ${passthruUrl}.`
+      : null,
   };
 }
 
-export async function syncInboundWebhook(_tel) {
+export async function syncInboundWebhook(tel) {
+  const line = await inboundLineStatus(tel);
+  if (!tel.exotelReady) {
+    return { wired: false, error: line.error || "Exotel is not connected." };
+  }
   return {
-    wired: false,
-    error: "Inbound Exotel calls are configured in the Exotel dashboard (VoiceBot applet → your stream URL).",
+    wired: true,
+    streamResolverUrl: line.streamResolverUrl,
+    passthruUrl: line.passthruUrl,
+    error: null,
+    message: line.dashboardHint,
   };
 }
 
 export function inboundWebhookUrl(tel) {
-  return tel.publicBaseUrl ? `${tel.publicBaseUrl}/webhooks/exotel/inbound` : "";
+  return exotelInboundStreamResolverUrl(tel);
 }
 
 /** SMS OTP is not wired for Exotel in this build. */

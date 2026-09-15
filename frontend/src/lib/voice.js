@@ -599,15 +599,80 @@ function compactSpeech(text) {
     .replace(/\s+/g, "");
 }
 
+function stripSttUiPrefix(text) {
+  return String(text || "")
+    .replace(/^speaking(?=[\p{L}\p{M}\p{N}]|\s)/iu, "")
+    .replace(/^speaking\s*/i, "")
+    .trim();
+}
+
+const GREETING_OPENER = /^(?:नमस्ते|namaste|namaskar|hello|hi|hey|నమస్కార(?:ం)?)$/iu;
+
+function isGreetingOpenerEcho(heard, lastSpoken = "") {
+  const raw = stripSttUiPrefix(heard);
+  const spoken = String(lastSpoken || "").trim();
+  if (!raw || !spoken) return false;
+  const normalized = raw.replace(/[^\p{L}\p{M}\p{N}\s]+/gu, " ").replace(/\s+/g, " ").trim();
+  if (!GREETING_OPENER.test(normalized)) return false;
+  const spokenOpen = spoken.slice(0, 48);
+  if (/नमस्ते/i.test(normalized) && /नमस्ते/.test(spokenOpen)) return true;
+  if (/namaste|namaskar/i.test(normalized) && /namaste|namaskar/i.test(spokenOpen)) return true;
+  if (/^hello$/i.test(normalized) && /\bhello\b/i.test(spokenOpen)) return true;
+  if (/^hi$/i.test(normalized) && /\bhi\b/i.test(spokenOpen)) return true;
+  return false;
+}
+
+function hasCallerIntent(text) {
+  const raw = String(text || "").trim();
+  if (!raw) return false;
+  const normalized = raw.replace(/[^\p{L}\p{M}\p{N}\s]+/gu, " ").replace(/\s+/g, " ").trim();
+  const lower = normalized.toLowerCase();
+  const words = normalized.split(/\s+/).filter(Boolean);
+  if (/^(yes|yeah|yep|sure|ok|okay|no|nope|haan|हां|जी)\b/.test(lower)) return true;
+  if (/\b(you can|i can|can you|go ahead|send me|just send|please send)\b/i.test(normalized)) {
+    return true;
+  }
+  if (/\b(want|need|upload|register|book|call|stop|wait)\b/i.test(normalized) && words.length >= 3) {
+    return true;
+  }
+  if (/\bon whatsapp\b/i.test(normalized)) return true;
+  if (
+    /\bwhatsapp\b/i.test(normalized)
+    && /\b(send|please|yes|yeah|me|my|link)\b/i.test(normalized)
+    && words.length >= 3
+  ) {
+    return true;
+  }
+  if (/\b(send|link)\b/i.test(normalized) && words.length >= 4) return true;
+  return false;
+}
+
+function isLikelySpokenFragmentEcho(heard, lastSpoken = "") {
+  const raw = stripSttUiPrefix(heard);
+  const spoken = String(lastSpoken || "").trim();
+  if (!raw || !spoken) return false;
+  if (hasCallerIntent(raw)) return false;
+  const heardBits = compactSpeech(raw);
+  const spokenBits = compactSpeech(spoken);
+  if (!heardBits || heardBits.length < 4 || !spokenBits.includes(heardBits)) return false;
+  if (heardBits.length <= 96) return true;
+  return heardBits.length / spokenBits.length < 0.55;
+}
+
 /** True when STT is hearing the agent's own TTS (speaker → mic echo). */
 export function isLikelyAgentEcho(heard, lastSpoken = "") {
-  const heardBits = compactSpeech(heard);
+  const raw = stripSttUiPrefix(heard);
+  if (hasCallerIntent(raw)) return false;
+  if (/^(hi|hello|hey|yes|yeah|sure|ok|okay)\.?$/i.test(String(raw || "").trim())) return false;
+  if (isGreetingOpenerEcho(raw, lastSpoken)) return true;
+  if (isLikelySpokenFragmentEcho(raw, lastSpoken)) return true;
+  const heardBits = compactSpeech(raw);
   const spokenBits = compactSpeech(lastSpoken);
   if (!heardBits || !spokenBits) return false;
-  if (spokenBits.includes(heardBits)) return true;
+  if (heardBits.length <= 96 && spokenBits.includes(heardBits)) return true;
   if (heardBits.length >= 6 && spokenBits.includes(heardBits.slice(0, Math.min(heardBits.length, 18)))) return true;
   if (heardBits.length >= 8 && heardBits.includes(spokenBits.slice(0, Math.min(24, spokenBits.length)))) return true;
-  const heardWords = String(heard || "").trim().split(/\s+/).filter(Boolean);
+  const heardWords = raw.split(/\s+/).filter(Boolean);
   const spokenWords = String(lastSpoken || "").trim().split(/\s+/).filter(Boolean);
   if (!heardWords.length || !spokenWords.length) return false;
   const spokenSet = new Set(spokenWords.map((w) => compactSpeech(w)).filter(Boolean));

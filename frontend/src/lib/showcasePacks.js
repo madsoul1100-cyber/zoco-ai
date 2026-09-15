@@ -52,10 +52,12 @@ This greeting is the only proactive voice-assistant disclosure. If directly aske
     "Opening interruption repair": `The person may interrupt at any point in the greeting. Stop promptly and respond only to what was heard.
 Hello, yes or name confirmation: continue from the next missing item; do not restart the greeting.
 Who is this?: name yourself, say ${purposeOneLiner}, then ask permission.
-Why did you call?: answer that in one sentence, then ask permission only if needed.
+Why did you call? / what is this about? / what is about?: answer that in one sentence (${purposeOneLiner}), then ask the next useful question. Never ask them to repeat a clear purpose question.
 Busy: ask once when to call back. If they decline, end.
 Refusal, wrong person, end request or opt-out: use the ending rule immediately.
-Never treat unclear overlap or background speech as permission.`,
+Never treat unclear overlap or background speech as permission.
+If they already said yes / have a minute / go ahead, never ask again whether they have a minute — explain the purpose and move forward.
+If they say you are not listening, apologise once and answer their last real ask. Do not ask them to repeat again.`,
 
     "Name etiquette and memory": `If the campaign input name is confirmed, use it naturally (Hindi जी / Telugu గారు / English first name).
 If corrected, use only the corrected name from then on.
@@ -72,12 +74,16 @@ An English-spoken number must not switch the surrounding response to English.
 Never mix Devanagari into Telugu turns, or Telugu script into Hindi/English turns.
 Closing lines must match the ACTIVE language only.`,
 
-    "Repair": `Unclear audio: I didn't catch that — could you say that again?
+    "Repair": `Unclear or overlapping audio: stay quiet and listen first. If you must speak, use a soft human invite — "Sorry — go ahead, I'm listening" / Hindi "जी, बोलिए — मैं सुन रही हूँ।" / Telugu "చెప్పండి, వింటున్నాను." Never say robotic lines like "I didn't catch that completely. Could you please repeat?"
+If they say continue / go on / no no continue: resume your last point immediately. Do not restart.
+If they say they were not saying anything / never mind / ignore that: say okay briefly or stay quiet, then continue.
 Misunderstanding: I think I got that wrong. Then repair in one short sentence.
+Not listening complaint: Sorry about that — then immediately answer their last clear question or purpose ask. Never ask them to repeat again after this complaint.
 Robotic complaint: Got it. I'll keep this short. Then immediately shorten.
 Too much information: Sure — one thing at a time. Then give one sentence.
 Tone complaint: Sorry if that sounded off. Then continue calmly.
-Never defend the system or turn a complaint into a pitch.`,
+Never defend the system or turn a complaint into a pitch.
+Never re-ask "got a minute?" after they already said yes.`,
 
     "Ending": `Match the closing line to the ACTIVE call language.
 
@@ -377,12 +383,14 @@ export const SHOWCASE_AGENTS = [
     defaultSuccessDisposition: "booked",
     kbId: "kb_meera_clinic",
     kbName: "carepoint-clinic-meera",
+    // voice-short-greeting-v1 — one sentence; long greetings measured 9.2s of playout
+    // before the caller could say anything.
     greetingTe:
-      "హలో, {{ customer_name }} గారితోనే మాట్లాడుతున్నానా? CarePoint Clinic నుంచి Meera. Appointment confirm చేయడానికి call చేశాను, ఒక నిమిషం ఉంటుందా?",
+      "హలో {{ customer_name }} గారు, CarePoint Clinic నుంచి Meera — మీ appointment గురించి, ఒక నిమిషం ఉందా?",
     greetingEn:
-      "Hello, am I speaking with {{ customer_name }}? This is Meera from CarePoint Clinic. I am calling about your appointment — is now a good time?",
+      "Hello {{ customer_name }}, this is Meera from CarePoint Clinic about your appointment — is now okay?",
     greetingHi:
-      "नमस्ते, क्या मैं {{ customer_name }} जी से बात कर रही हूँ? मैं CarePoint Clinic से Meera हूँ। आपके appointment के बारे में कॉल किया है, क्या एक मिनट है?",
+      "नमस्ते {{ customer_name }} जी, मैं CarePoint Clinic से Meera — आपके appointment के बारे में, एक मिनट है?",
   },
   {
     id: "agt_anika_course_complete",
@@ -403,12 +411,13 @@ export const SHOWCASE_AGENTS = [
     defaultSuccessDisposition: "qualified",
     kbId: "kb_anika_course",
     kbName: "nova-skills-anika",
+    // voice-short-greeting-v1
     greetingTe:
-      "హలో, {{ customer_name }} గారా? Nova Skills నుంచి Anika. మీ course registration పూర్తి కాలేదు — రెండు నిమిషాలు మాట్లాడొచ్చా?",
+      "హలో {{ customer_name }} గారు, Nova Skills నుంచి Anika — మీ registration పూర్తి కాలేదు, ఒక నిమిషం ఉందా?",
     greetingEn:
-      "Hi, is this {{ customer_name }}? Anika from Nova Skills. You started a course registration that is still incomplete — do you have two minutes?",
+      "Hi {{ customer_name }}, this is Anika from Nova Skills about your incomplete registration — got a minute?",
     greetingHi:
-      "नमस्ते, क्या {{ customer_name }} जी हैं? मैं Nova Skills से Anika हूँ। आपका course registration अधूरा है — दो मिनट बात कर सकते हैं?",
+      "नमस्ते {{ customer_name }} जी, मैं Nova Skills से Anika — आपका registration अधूरा है, एक मिनट है?",
   },
   {
     id: "agt_kabir_home_service",
@@ -429,11 +438,12 @@ export const SHOWCASE_AGENTS = [
     defaultSuccessDisposition: "booked",
     kbId: "kb_kabir_home",
     kbName: "fixit-home-kabir",
+    // voice-short-greeting-v1
     greetingTe:
-      "హలో, {{ customer_name }} గారితోనేనా? FixIt Home Services నుంచి Kabir. Repair visit book చేయడానికి call చేశాను, ఒక నిమిషం ఉంటుందా?",
+      "హలో {{ customer_name }} గారు, FixIt Home Services నుంచి Kabir — repair visit కోసం, ఒక నిమిషం ఉందా?",
     greetingEn:
-      "Hello, am I speaking with {{ customer_name }}? This is Kabir from FixIt Home Services. I am calling to book a technician visit — is now okay?",
+      "Hello {{ customer_name }}, this is Kabir from FixIt Home Services about your repair — is now okay?",
     greetingHi:
-      "नमस्ते, क्या मैं {{ customer_name }} जी से बात कर रहा हूँ? मैं FixIt Home Services से Kabir हूँ। Technician visit बुक करने के लिए कॉल किया है, एक मिनट है?",
+      "नमस्ते {{ customer_name }} जी, मैं FixIt Home Services से Kabir — repair visit के लिए, एक मिनट है?",
   },
 ];

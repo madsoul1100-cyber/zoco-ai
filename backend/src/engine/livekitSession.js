@@ -1,7 +1,7 @@
 import { v4 as uuid } from "uuid";
 import { liveKitInstructions, streamReply } from "../engine/conversation.js";
 import { applyOutcome } from "../engine/rules.js";
-import { renderGreeting } from "../engine/template.js";
+import { resolveGreeting } from "../engine/greeting.js";
 import { resolveLlmConfig, speakerGender } from "../engine/providers.js";
 import { runToolCall, toolName } from "../engine/tools.js";
 import { scheduleFollowUp } from "../services/calling.js";
@@ -12,6 +12,7 @@ import {
   getCallAgent,
   getRules,
   knowledgeContextForAgent,
+  knowledgeCatalogForAgent,
   saveCall,
 } from "../store.js";
 import { agentVoiceRuntime, mapLiveKitDisconnect } from "../services/livekit.js";
@@ -53,8 +54,23 @@ export async function buildSessionSnapshot(callId) {
   if (!agent) throw new Error("Agent not found");
   const settings = await getAiSettings();
   const llm = resolveLlmConfig(agent, settings);
-  const greeting = renderGreeting(agent, call.customer) || agent.greeting || "";
-  const knowledge = await knowledgeContextForAgent(agent, "", { limit: 6, maxChars: 3500 });
+  // voice-greeting-language-bind-v1 — the greeting must be in the language this call is
+  // spoken in, otherwise TTS renders one language from another language's text.
+  const spokenLanguage = call.language || agent.language || "te-IN";
+  const resolvedGreeting = await resolveGreeting({
+    agent,
+    customer: call.customer,
+    language: spokenLanguage,
+    speakerGender: speakerGender(agent),
+  });
+  const greeting = resolvedGreeting.text;
+  if (resolvedGreeting.source && resolvedGreeting.source !== resolvedGreeting.target) {
+    console.warn(
+      `Call ${callId}: greeting authored in ${resolvedGreeting.source} but call is ${resolvedGreeting.target}` +
+        (resolvedGreeting.translated ? " — translated" : " — TRANSLATION UNAVAILABLE, speaking as authored")
+    );
+  }
+  const knowledge = await knowledgeCatalogForAgent(agent, { maxChars: 1200 });
   const instructions = liveKitInstructions({
     agent,
     knowledge,
@@ -66,7 +82,9 @@ export async function buildSessionSnapshot(callId) {
     greeting,
     instructions,
     knowledge,
-    language: call.language || agent.language || "te-IN",
+    language: spokenLanguage,
+    greetingLanguage: resolvedGreeting.target,
+    greetingTranslated: resolvedGreeting.translated,
     agent: {
       id: agent.id,
       name: agent.name,

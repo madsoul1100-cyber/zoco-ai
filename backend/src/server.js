@@ -9,6 +9,11 @@ import { applyOutcome, dashboardStats, DISPOSITIONS } from "./engine/rules.js";
 import { publicProviderCatalog, resolveLlmConfig } from "./engine/providers.js";
 import { sttReady, transcribeAudio, transcribeFromUrl } from "./engine/stt.js";
 import { mountExotelStream } from "./engine/exotelStream.js";
+import {
+  applyExotelStreamMetadata,
+  isExotelStreamMetadataRequest,
+  prepareExotelInboundStream,
+} from "./telephony/exotelInbound.js";
 import { mountSttStream } from "./engine/sttStream.js";
 import { mountTtsStream } from "./engine/ttsStream.js";
 import { QUIET_OFFICE_PATH } from "./engine/ambient.js";
@@ -61,6 +66,7 @@ import {
   getCall,
   getCallAgent,
   getCallByTwilioSid,
+  getCallByExotelSid,
   getContact,
   getInbound,
   getRules,
@@ -1270,6 +1276,53 @@ app.post("/webhooks/twilio/status", async (req, res) => {
   await saveCall(call);
   res.sendStatus(204);
 });
+
+async function handleExotelInbound(req, res) {
+  try {
+    const params = { ...req.query, ...req.body };
+    const tel = await resolveTelephony();
+    if (!tel.exotelReady) {
+      return res.status(503).json({ error: "Exotel is not connected in Zoco." });
+    }
+
+    if (isExotelStreamMetadataRequest(params)) {
+      const exotelSid = String(
+        params.CallSid || params.Callsid || params.call_sid || ""
+      ).trim();
+      const call = exotelSid ? await getCallByExotelSid(exotelSid) : null;
+      if (call) await applyExotelStreamMetadata(call, params);
+      return res.status(200).json({ ok: true });
+    }
+
+    const inbound = await resolveInboundLine(normalizePhone(params.To || params.to));
+    const sampleRate = Number(params["sample-rate"] || params.sampleRate || 16000) || 16000;
+    const { url } = await prepareExotelInboundStream({ params, inbound, tel, sampleRate });
+    return res.status(200).json({ url });
+  } catch (error) {
+    console.warn("Exotel inbound resolver failed:", error.message);
+    return res.status(503).json({ error: error.message });
+  }
+}
+
+async function handleExotelPassthru(req, res) {
+  try {
+    const params = { ...req.query, ...req.body };
+    const exotelSid = String(
+      params.CallSid || params.Callsid || params.call_sid || ""
+    ).trim();
+    const call = exotelSid ? await getCallByExotelSid(exotelSid) : null;
+    if (call) await applyExotelStreamMetadata(call, params);
+    return res.sendStatus(200);
+  } catch (error) {
+    console.warn("Exotel passthru failed:", error.message);
+    return res.sendStatus(200);
+  }
+}
+
+app.get("/webhooks/exotel/inbound", handleExotelInbound);
+app.post("/webhooks/exotel/inbound", handleExotelInbound);
+app.get("/webhooks/exotel/passthru", handleExotelPassthru);
+app.post("/webhooks/exotel/passthru", handleExotelPassthru);
 
 app.post("/webhooks/exotel/status", async (req, res) => {
   const callId = req.query.callId || req.body?.CustomField || req.body?.customfield;

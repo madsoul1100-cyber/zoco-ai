@@ -27,7 +27,8 @@ export function openAiTools(agent) {
       type: "function",
       function: {
         name: "query_knowledge",
-        description: "Look up facts from attached knowledge bases. Use when the caller asks a factual question.",
+        description:
+          "Look up facts from attached knowledge bases using semantic retrieval. Always invoke this before answering factual questions about products, policies, prices, eligibility, or documents. Do not invent answers when a matching document may exist.",
         parameters: { type: "object", properties: { question: { type: "string" } }, required: ["question"] },
       },
     },

@@ -120,6 +120,7 @@ export const api = {
     return response.json();
   },
   deleteDocument: (id, docId) => request(`/api/knowledge/${id}/documents/${docId}`, { method: "DELETE" }),
+  reindexKnowledge: (id) => request(`/api/knowledge/${id}/reindex`, { method: "POST" }),
   queryKnowledge: (id, question) => request(`/api/knowledge/${id}/query`, { method: "POST", body: JSON.stringify({ question }) }),
   inbound: () => request("/api/inbound"),
   saveInbound: (payload) => request("/api/inbound", { method: "PUT", body: JSON.stringify(payload) }),

@@ -98,6 +98,8 @@ export default function AgentStudio() {
   const [voiceName, setVoiceName] = useState("");
   const [liveText, setLiveText] = useState("");
   const [heardText, setHeardText] = useState("");
+  const [heardIsFinal, setHeardIsFinal] = useState(true);
+  const [userSpeaking, setUserSpeaking] = useState(false);
   const [pendingUserText, setPendingUserText] = useState("");
   const recorder = useRef(null);
   const chunks = useRef([]);
@@ -332,8 +334,12 @@ export default function AgentStudio() {
         const userText = String(lastUser?.text || "").trim();
         const assistantText = String(lastAssistant?.text || "").trim();
         if (userText) {
-          setPendingUserText((pending) => (pending && userText.includes(pending) ? "" : pending));
-          setHeardText((heard) => (heard && userText.includes(heard) ? "" : heard));
+          const norm = (value) => String(value || "").trim().replace(/[^\p{L}\p{M}\p{N}\s]+/gu, "").toLowerCase();
+          const saved = norm(userText);
+          setPendingUserText((pending) => (pending && saved === norm(pending) ? "" : pending));
+          setHeardText((heard) => (heard && saved === norm(heard) ? "" : heard));
+          setUserSpeaking(false);
+          setHeardIsFinal(true);
         }
         if (assistantText) {
           setLiveText((live) => (live && assistantText.includes(live) ? "" : live));
@@ -349,6 +355,8 @@ export default function AgentStudio() {
           await new Promise((resolve) => setTimeout(resolve, drainMs));
           await stopLiveKitSession();
           setPhase("idle");
+          // The agent ended the call itself; without this the recording is never uploaded.
+          await stopMic();
         }
       } catch {
         /* ignore poll errors */
@@ -360,6 +368,8 @@ export default function AgentStudio() {
     setError("");
     setLiveText("");
     setHeardText("");
+    setHeardIsFinal(true);
+    setUserSpeaking(false);
     setPendingUserText("");
     setMode("voice");
     modeRef.current = "voice";
@@ -369,26 +379,62 @@ export default function AgentStudio() {
     callRef.current = existing;
     setCall(existing);
     setPhase("connecting");
+    /*
+     * voice-record-agent-leg-v1 — LiveKit calls were never recorded at all: only the
+     * Personalized runtime started the recorder. Start it first so the AudioContext refs
+     * exist before we connect and begin routing the agent's track into it.
+     */
+    await startMic(existing.id);
     const sessionInfo = await api.startLiveKitSession(existing.id);
     const connected = await connectLiveKitVoice({
       url: sessionInfo.url,
       token: sessionInfo.token,
+      // voice-record-agent-leg-v1 — record the agent's own audio, not just speaker bleed.
+      captureContext: recordingAudioContextRef.current,
+      captureDestination: recordingDestinationRef.current,
       onTranscript: ({ text, isFinal, role }) => {
         if (role === "user") {
-          setHeardText(text);
-          if (isFinal) setPendingUserText(text);
+          const clean = String(text || "").trim();
+          if (!isFinal) {
+            // voice-live-partials-restore-v1 — show growing STT text, not dots-only
+            setUserSpeaking(true);
+            setHeardIsFinal(false);
+            if (clean) {
+              setHeardText(clean);
+              // Drop stale pending from the previous turn so the new line is visible.
+              setPendingUserText((prev) => {
+                const pending = String(prev || "").trim();
+                if (!pending) return prev;
+                const p = pending.toLowerCase();
+                const c = clean.toLowerCase();
+                if (c === p || c.startsWith(p) || p.startsWith(c)) return prev;
+                return "";
+              });
+            }
+            return;
+          }
+          setUserSpeaking(false);
+          setHeardIsFinal(true);
+          setHeardText(clean);
+          setPendingUserText(clean);
         } else {
-          setLiveText(text);
+          setLiveText(String(text || "").trim());
+          if (isFinal) setLiveText("");
         }
       },
       onSpeaking: (speaking) => {
         if (isLive()) setPhase(speaking ? "speaking" : "listening");
+        if (speaking) setUserSpeaking(false);
       },
       onDisconnected: () => {
         setPhase("idle");
       },
     });
     livekitSessionRef.current = connected;
+    greetingProtectRef.current = true;
+    setTimeout(() => {
+      greetingProtectRef.current = false;
+    }, 3500);
     startLiveKitPoll(existing.id);
     setPhase((current) => (current === "connecting" ? "listening" : current));
   }
@@ -464,21 +510,33 @@ export default function AgentStudio() {
         return;
       }
     }
-    if (liveKitVoiceReady()) {
+    if (agentVoiceRuntime() === "livekit") {
+      if (!liveKitVoiceReady()) {
+        setError(
+          "LiveKit is not ready. Set LIVEKIT_URL, LIVEKIT_API_KEY, LIVEKIT_API_SECRET, and LIVEKIT_BRIDGE_TOKEN in .env, then run `npm run dev:worker`."
+        );
+        setPhase("idle");
+        return;
+      }
       try {
         await goLiveLiveKit(existing);
         return;
       } catch (err) {
-        if (!/personalized/i.test(String(err.message || ""))) {
-          setError(err.message);
-          setPhase("idle");
-          return;
-        }
+        setError(err.message);
+        setPhase("idle");
+        return;
       }
+    }
+    if (agentVoiceRuntime() !== "personalized") {
+      setError(`Voice stack "${agentVoiceRuntime()}" is not available. Open Settings and pick LiveKit or Personalized.`);
+      setPhase("idle");
+      return;
     }
     setError("");
     setLiveText("");
     setHeardText("");
+    setHeardIsFinal(true);
+    setUserSpeaking(false);
     setMode("voice");
     modeRef.current = "voice";
     wantListenRef.current = false;
@@ -710,6 +768,8 @@ export default function AgentStudio() {
     if (isNoiseTranscript(spoken, lastSpokenRef.current) || isLikelyAgentEcho(spoken, lastSpokenRef.current)) {
       heardRef.current = "";
       setHeardText("");
+      setUserSpeaking(false);
+      setHeardIsFinal(true);
       return;
     }
     void acceptUserSpeech(spoken);
@@ -724,6 +784,8 @@ export default function AgentStudio() {
 
   function noteVoiceActivity(text = "") {
     lastVoiceActivityRef.current = Date.now();
+    setUserSpeaking(true);
+    setHeardIsFinal(false);
     if (text) {
       heardRef.current = text;
       setHeardText(text);
@@ -799,6 +861,8 @@ export default function AgentStudio() {
     heardRef.current = spoken;
     setPendingUserText(spoken);
     setHeardText(spoken);
+    setUserSpeaking(false);
+    setHeardIsFinal(true);
     setLiveText("");
     setPhase("thinking");
     let nextCall = null;
@@ -1011,6 +1075,14 @@ export default function AgentStudio() {
 
   async function startMic(callId) {
     if (!navigator.mediaDevices?.getUserMedia) return;
+    /*
+     * voice-recording-integrity-v1 — never let two recorders overlap.
+     *
+     * A recorder left running from a previous call kept firing ondataavailable into the
+     * shared chunk buffer, so a new call's WebM began mid-stream with no EBML header.
+     * A call audit found 11 of 68 uploads undecodable by ffmpeg for exactly this reason.
+     */
+    if (recorder.current) await stopMic();
     const stream = await navigator.mediaDevices.getUserMedia({
       audio: {
         channelCount: 1,
@@ -1041,13 +1113,15 @@ export default function AgentStudio() {
     const media = preferredType
       ? new MediaRecorder(recordingStream, { mimeType: preferredType })
       : new MediaRecorder(recordingStream);
-    chunks.current = [];
+    // Owned by this recorder alone, so a late event from an older one cannot corrupt it.
+    const mediaChunks = [];
+    chunks.current = mediaChunks;
     media.ondataavailable = (event) => {
-      if (event.data.size) chunks.current.push(event.data);
+      if (event.data.size) mediaChunks.push(event.data);
     };
     recordingDoneRef.current = new Promise((resolve) => {
       media.onstop = async () => {
-        const blob = new Blob(chunks.current, { type: media.mimeType || "audio/webm" });
+        const blob = new Blob(mediaChunks, { type: media.mimeType || "audio/webm" });
         try {
           if (blob.size) {
             const saved = await api.uploadRecording(callId, blob);
@@ -1478,6 +1552,7 @@ export default function AgentStudio() {
           if (Date.now() < ignoreUntilRef.current) return;
           resetBargeCandidate();
           clearNudgeTimer();
+          setUserSpeaking(true);
         },
         onVadEnd: () => {
           if (!wantListenRef.current || asrGenerationRef.current !== loopId) return;
@@ -1794,6 +1869,8 @@ export default function AgentStudio() {
             messages={call.messages}
             liveText={liveText}
             heardText={heardText}
+            heardIsFinal={heardIsFinal}
+            userSpeaking={userSpeaking}
             pendingUserText={pendingUserText}
           />
           {live ? (

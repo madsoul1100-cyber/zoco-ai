@@ -112,7 +112,14 @@ export function Modal({ open, title, onClose, children, footer }) {
   );
 }
 
-export function MessageTimeline({ messages = [], liveText, heardText, pendingUserText }) {
+export function MessageTimeline({
+  messages = [],
+  liveText,
+  heardText,
+  heardIsFinal = true,
+  userSpeaking = false,
+  pendingUserText,
+}) {
   const boxRef = useRef(null);
 
   useEffect(() => {
@@ -123,11 +130,17 @@ export function MessageTimeline({ messages = [], liveText, heardText, pendingUse
 
   const lastUser = [...messages].reverse().find((m) => m.role === "user");
   const lastAssistant = [...messages].reverse().find((m) => m.role === "assistant");
+  const norm = (value) =>
+    String(value || "").trim().replace(/[^\p{L}\p{M}\p{N}\s]+/gu, "").replace(/\s+/g, " ").toLowerCase();
   const pending = String(pendingUserText || "").trim();
-  const showPending = pending && pending !== String(lastUser?.text || "").trim();
   const hearing = String(heardText || "").trim();
-  // Keep the live caption even while a pending line exists if hearing is newer/different.
-  const showHearing = hearing && hearing !== pending && hearing !== String(lastUser?.text || "").trim();
+  // While the user is mid-utterance, prefer live hearing so a stale pending line cannot hide it.
+  const liveUser =
+    (userSpeaking || !heardIsFinal) && hearing ? hearing : pending || hearing;
+  const lastUserNorm = norm(lastUser?.text);
+  const liveUserNorm = norm(liveUser);
+  const showDotsOnly = userSpeaking && !liveUser;
+  const showUserLive = showDotsOnly || (liveUserNorm && liveUserNorm !== lastUserNorm);
   const live = String(liveText || "").trim();
   // Avoid duplicate bubble: final assistant message + same live caption.
   const showLive = live && live !== String(lastAssistant?.text || "").trim();
@@ -136,26 +149,23 @@ export function MessageTimeline({ messages = [], liveText, heardText, pendingUse
     <div className="timeline" ref={boxRef}>
       {messages.map((message) => (
         <div key={message.id} className={`bubble ${message.role}`}>
-          <b>{message.role}</b>
+          {/* voice-transcript-colon-gap-v1 */}
+          <b>{message.role}:</b>{" "}
           {message.text}
           {message.source ? <em>{message.source}</em> : null}
         </div>
       ))}
-      {showPending ? (
-        <div className="bubble user pending">
-          <b>you</b>
-          {pending}
-        </div>
-      ) : null}
-      {showHearing ? (
-        <div className="bubble user live-hear">
-          <b>you · speaking</b>
-          {hearing}
+      {showUserLive ? (
+        <div className={`bubble user ${showDotsOnly ? "live-hear" : "pending"}`}>
+          {/* voice-transcript-colon-gap-v1 */}
+          <b>{showDotsOnly ? "you · speaking:" : "you:"}</b>{" "}
+          {showDotsOnly ? "…" : liveUser}
         </div>
       ) : null}
       {showLive ? (
         <div className="bubble assistant live-speak">
-          <b>assistant · speaking</b>
+          {/* voice-transcript-colon-gap-v1 */}
+          <b>assistant · speaking:</b>{" "}
           {live}
         </div>
       ) : null}

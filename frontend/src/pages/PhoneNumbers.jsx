@@ -128,11 +128,13 @@ export default function PhoneNumbers() {
       <section className="product-sheet" style={{ marginTop: 20 }}>
         <h3>Voice stream URL</h3>
         <p className="muted">
-          Point Exotel AgentStream / VoiceBot to:{" "}
-          <code>{streamBase}/api/exotel/stream?callId=&lt;call-id&gt;</code>
+          Voicebot applet URL (HTTPS, dynamic): <code>{streamBase}/webhooks/exotel/inbound</code>
         </p>
         <p className="muted">
-          Status callbacks: <code>{streamBase}/webhooks/exotel/status</code>
+          Passthru after Voicebot: <code>{streamBase}/webhooks/exotel/passthru</code>
+        </p>
+        <p className="muted">
+          Outbound status callbacks: <code>{streamBase}/webhooks/exotel/status</code>
         </p>
       </section>
 

@@ -207,7 +207,7 @@ export function liveKitLanguageSwitchRule(agent = {}) {
 }
 
 export function liveKitSpeechLengthRule() {
-  return "SPOKEN LENGTH (hard rule): Speak one short sentence, then one question. Two sentences only if needed. Never a paragraph. Never stop after two or three words such as हाँ जी, ठीक है, or Namaskaram. Finish every sentence you start.";
+  return "SPOKEN LENGTH (hard rule): Speak slowly and calmly — one unhurried sentence, then wait. Ask at most one question, and only after you understood them. Never pile on the next script step. Never rush to close the call. Never stop after two or three words such as हाँ जी, ठीक है, or Namaskaram. Finish every sentence you start.";
 }
 
 export function liveKitInstructions({ agent, knowledge = "", slots = {}, customer = {} }) {
@@ -278,16 +278,25 @@ Hard speech rules from the Instructions (never break these):
     Array.isArray(agent.customTools) && agent.customTools.length
       ? `You may call HTTP tools when you need live data. Do not mention tool names. After a tool result, speak a short natural update.`
       : "",
-    knowledge ? `Use this knowledge base only when the customer asks something factual. Never read it out as a list. Knowledge:\n${knowledge}` : "",
+    Array.isArray(agent.knowledgeBaseIds) && agent.knowledgeBaseIds.length
+      ? `KNOWLEDGE (hard rule): When the caller asks a factual question about products, policies, prices, eligibility, or documents, call query_knowledge before answering. Prefer retrieved knowledge over invention. If nothing relevant is returned, say you do not have that detail — never invent it.`
+      : "",
+    knowledge
+      ? knowledge.includes("file catalog only") || knowledge.includes("Attached knowledge bases")
+        ? `Knowledge attached (catalog):\n${knowledge}`
+        : `Use this knowledge base only when the customer asks something factual. Never read it out as a list. Prefer these excerpts over invention. Knowledge:\n${knowledge}`
+      : "",
     slots && Object.keys(slots).length ? `Known details: ${JSON.stringify(slots)}` : "",
     voiceStream
       ? agent._liveKitSession
-        ? "VOICE STREAM: One short spoken sentence, then one question. Two sentences only if needed. Never a paragraph. Never stop after two or three words. After a language switch, confirm the language AND say why you called in the SAME turn. If ending, close fully then [END:...]."
+        ? "VOICE STREAM: Speak slowly. Answer only what they just finished saying. One calm sentence. Do not jump to the next script item. Do not end the call unless they clearly say goodbye or not interested. Never a paragraph. After a language switch, confirm the language in the SAME turn."
         : "VOICE STREAM: At most TWO short spoken sentences. Complete your point in this turn — never stop at only okay / ठीक है / जी हाँ / हाँ / Namaskaram. After a language switch, confirm the language AND say why you called and ask for ~30 seconds in the SAME turn. If ending, close fully then [END:...]. If continuing, finish with one clear question."
       : "",
     voiceStream ? voiceObjectiveReminder(agent, history, slots) : "",
     `LISTEN FIRST (hard rule): The customer's latest message is the only thing you must answer on this turn. If they ask who you are, why you called, what this is about, what you want to say next, or ask to change language, answer that clearly before any script question. Never ignore their words to push the outbound pitch. Never invent that they agreed to something they did not say.`,
-    `COMPLETE THE TURN (hard rule): Do not leave a dangling acknowledgement. Every reply must either (1) fully close the call with the correct ending line + [END:...], or (2) deliver the next useful point and end with one question. Never say only “okay / ठीक है / धन्यवाद” and wait.`,
+    agent._liveKitSession
+      ? `COMPLETE THE TURN (hard rule): Wait until their thought is finished. Then answer that thought only. Do not push the next form field, WhatsApp ask, or hangup unless they already answered the current point. Do not close the call to look efficient. If you missed words, ask them to repeat that one line — do not guess.`
+      : `COMPLETE THE TURN (hard rule): Do not leave a dangling acknowledgement. Every reply must either (1) fully close the call with the correct ending line + [END:...], or (2) deliver the next useful point and end with one question. Brief listening acks (“mm-hmm”, “okay”, “haan”) at the start of a reply are fine — but always continue with the next useful point in the same breath. Never ack-only and wait.`,
     `SOUND HUMAN (hard rule): Speak like a real person on a phone — warm, brief, conversational. Keep natural punctuation (?, !, commas, ।) so TTS can breathe and ask questions with real intonation. Avoid stiff IVR phrasing.`,
     `Reply with spoken words only.`,
     rich

@@ -21,6 +21,8 @@ Voice tests use **LiveKit** when `LIVEKIT_URL`, `LIVEKIT_API_KEY`, and `LIVEKIT_
 
 Optional **Pipecat** stack uses [Pipecat Cloud REST](https://docs.pipecat.ai/api-reference/pipecat-cloud/rest-reference/overview): set `PIPECAT_CLOUD_PUBLIC_KEY` and `PIPECAT_CLOUD_AGENT_NAME` (private key optional for agent/secrets management). Local `PIPECAT_URL` + `npm run dev:pipecat` is a fallback. In Agent Studio, set **Voice stack** to Pipecat.
 
+Production voice notes (Node vs Python, echo / interruption): see [docs/VOICE_RUNTIME.md](docs/VOICE_RUNTIME.md).
+
 ## What this prototype already does
 
 - Create inbound / outbound agents with greeting, persona, and success criteria
